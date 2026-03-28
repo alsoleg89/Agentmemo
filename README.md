@@ -4,11 +4,11 @@
 ![PyPI](https://img.shields.io/pypi/v/agentmemo)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-**Agent Knowledge Layer. Extract. Store. Retrieve. Any backend.**
+**Agent knowledge layer — distills conversations into structured facts, retrieves what matters, forgets the rest.**
 
-Your agents don't need a memory — they need a knowledge base.
-agentmemo distills conversations into structured facts, finds the right ones
-when needed, and forgets the irrelevant. One line of code. Any storage backend.
+Most agent frameworks treat memory as a log. agentmemo treats it as a knowledge base.
+It extracts facts from conversations, scores them by importance, and retrieves only what's
+relevant when building the next prompt. Pluggable storage, six LLM providers, no vendor lock-in.
 
 ---
 
@@ -18,17 +18,16 @@ Most frameworks store everything — messages, tool calls, system prompts, the w
 That's fine until you're paying to inject six months of conversation history
 into every request, most of which has nothing to do with what the user asked.
 
-At inference time you need maybe 300 tokens of context. You have 400,000 in the log.
-Which 300?
-
-That's the question agentmemo answers.
+The log grows to 400k tokens. The model needs maybe 300 of those for the next turn —
+but there's no obvious way to know which ones without reading all of them first.
+agentmemo solves this by keeping a distilled knowledge base instead of a raw log.
 
 ```
-Raw conversation (1000 messages, ~400k tokens)
-          |  LLM distillation
-Structured facts (12 entries, ~300 tokens)
-          |  Embeddings + vector search
-Relevant context (3 facts, injected into prompt)
+1000 messages  (~400k tokens)
+    ↓ LLM extraction
+~12 facts      (~300 tokens)
+    ↓ TF-IDF retrieval
+3–5 facts injected into the next prompt
 ```
 
 ---
@@ -83,8 +82,8 @@ response = openai_client.chat(...,
 
 ## What agentmemo keeps — and what it drops
 
-It runs your conversation through an LLM and pulls out facts worth remembering.
-Everything else is discarded.
+Pass it a conversation and it calls your LLM to figure out what's worth keeping —
+preferences, recurring patterns, explicit facts. Greetings, clarifications, filler — those don't make the cut.
 
 ```
 What happened in the conversation:         What agentmemo stores:
@@ -284,6 +283,15 @@ Conversation Turns
 Context String        injected into agent system prompt
 ```
 
+**Why TF-IDF instead of embeddings?** Embeddings need either an API call or a 500 MB local model just
+to recall which language the user prefers. For knowledge bases up to ~10k facts, TF-IDF with hybrid
+scoring (keyword match + retention + importance) is fast, deterministic, and requires zero extra setup.
+Semantic embeddings are on the roadmap for larger knowledge bases where keyword overlap isn't reliable.
+
+**Known limitation:** extraction quality depends on the LLM. GPT-4o extracts nuanced procedural
+facts reliably; smaller models (gpt-3.5-turbo, haiku) occasionally miss implicit preferences or
+conflate episodic events with semantic facts. When accuracy matters, use a capable model for `learn()`.
+
 ---
 
 ## Examples
@@ -444,4 +452,4 @@ MIT
 
 ---
 
-**If agentmemo made your agents smarter, give it a star.**
+Found a bug or a missing backend? Open an issue. Built something with it? We'd like to hear.
