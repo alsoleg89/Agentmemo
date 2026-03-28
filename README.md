@@ -259,10 +259,16 @@ kb.add("User deploys on Docker")
 
 client = MemoryEnabledOpenAI(knowledge_base=kb)
 
+import openai
+openai_client = openai.OpenAI()
+
 messages = [{"role": "user", "content": "Write me a deployment script"}]
 enriched = client.enrich_messages(messages)
-# System prompt now includes relevant memory context.
-# Pass `enriched` to your OpenAI client.
+
+response = openai_client.chat.completions.create(
+    model="gpt-4o",
+    messages=enriched,
+)
 ```
 
 ---
