@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,13 +11,19 @@ import yaml
 
 from agentmemo.knowledge import KnowledgeBase
 from agentmemo.storage.yaml_storage import YAMLStorage
-from agentmemo.types import MemoryType
+from agentmemo.types import Fact, MemoryType
 
 
 def _make_kb(agent_id: str, data_dir: str) -> KnowledgeBase:
     """Create a KnowledgeBase backed by the given data directory."""
     storage = YAMLStorage(base_dir=data_dir)
     return KnowledgeBase(agent_id=agent_id, storage=storage)
+
+
+def _parse_dt(value: str) -> datetime:
+    """Parse an ISO-format datetime string, ensuring UTC timezone."""
+    dt = datetime.fromisoformat(value)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 @click.group()
@@ -32,7 +38,7 @@ def main() -> None:
 def show(agent_id: str, data_dir: str) -> None:
     """Show all stored facts for an agent."""
     kb = _make_kb(agent_id, data_dir)
-    facts = kb._storage.load(agent_id)
+    facts = kb.list_facts()
 
     if not facts:
         click.echo(f"No facts stored for agent '{agent_id}'.")
@@ -115,7 +121,7 @@ def clear(agent_id: str, data_dir: str) -> None:
         click.echo("Aborted.")
         return
     kb = _make_kb(agent_id, data_dir)
-    kb._storage.save(agent_id, [])
+    kb.clear_all()
     click.echo(f"Cleared all facts for agent '{agent_id}'.")
 
 
@@ -126,7 +132,7 @@ def clear(agent_id: str, data_dir: str) -> None:
 def export_cmd(agent_id: str, output: str, data_dir: str) -> None:
     """Export facts to a YAML file."""
     kb = _make_kb(agent_id, data_dir)
-    facts = kb._storage.load(agent_id)
+    facts = kb.list_facts()
     data: dict[str, dict[str, Any]] = {}
     for f in facts:
         data[f.id] = {
@@ -151,16 +157,12 @@ def export_cmd(agent_id: str, output: str, data_dir: str) -> None:
 @click.option("--data-dir", default=".agentmemo", help="Storage directory.")
 def import_cmd(agent_id: str, input_file: str, data_dir: str) -> None:
     """Import facts from a YAML file."""
-    from agentmemo.storage.yaml_storage import _parse_datetime
-
     raw = yaml.safe_load(Path(input_file).read_text(encoding="utf-8"))
     if not raw:
         click.echo("No facts in file.")
         return
 
-    from agentmemo.types import Fact
-
-    facts = []
+    facts: list[Fact] = []
     for fid, entry in raw.items():
         facts.append(
             Fact(
@@ -171,11 +173,14 @@ def import_cmd(agent_id: str, input_file: str, data_dir: str) -> None:
                 retention_score=float(entry.get("retention_score", 1.0)),
                 access_count=int(entry.get("access_count", 0)),
                 tags=list(entry.get("tags", [])),
-                created_at=_parse_datetime(entry["created_at"]),
-                last_accessed=_parse_datetime(entry.get("last_accessed", entry["created_at"])),
+                created_at=_parse_dt(entry["created_at"]),
+                last_accessed=_parse_dt(entry.get("last_accessed", entry["created_at"])),
             )
         )
 
     kb = _make_kb(agent_id, data_dir)
-    kb._storage.save(agent_id, facts)
+    kb.clear_all()
+    for fact in facts:
+        kb._storage.save(agent_id, facts)
+        break  # save once, not per fact
     click.echo(f"Imported {len(facts)} facts for agent '{agent_id}'.")

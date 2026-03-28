@@ -10,6 +10,7 @@ from typing import Any
 from agentmemo.extractor import Extractor
 from agentmemo.forgetting import apply_decay
 from agentmemo.retriever import TFIDFRetriever
+from agentmemo.storage.base import StorageBackend
 from agentmemo.storage.yaml_storage import YAMLStorage
 from agentmemo.types import ConversationTurn, Fact, MemoryType
 
@@ -33,10 +34,10 @@ class KnowledgeBase:
     def __init__(
         self,
         agent_id: str,
-        storage: YAMLStorage | Any | None = None,
+        storage: StorageBackend | None = None,
     ) -> None:
         self._agent_id = agent_id
-        self._storage = storage or YAMLStorage()
+        self._storage: StorageBackend = storage or YAMLStorage()
         self._retriever = TFIDFRetriever()
 
     def add(
@@ -141,6 +142,14 @@ class KnowledgeBase:
         lines = [f"[{r.type.value}] {r.content}" for r in results]
         return "\n".join(lines)
 
+    def list_facts(self) -> list[Fact]:
+        """Return all stored facts for this agent.
+
+        Returns:
+            List of all Facts, in storage order.
+        """
+        return self._storage.load(self._agent_id)
+
     def forget(self, fact_id: str) -> None:
         """Remove a specific fact by its ID.
 
@@ -158,6 +167,11 @@ class KnowledgeBase:
         apply_decay(facts)
         self._storage.save(self._agent_id, facts)
         logger.debug("Applied decay to %d facts for agent '%s'", len(facts), self._agent_id)
+
+    def clear_all(self) -> None:
+        """Remove all facts for this agent."""
+        self._storage.save(self._agent_id, [])
+        logger.info("Cleared all facts for agent '%s'", self._agent_id)
 
     def stats(self) -> dict[str, Any]:
         """Return statistics about the knowledge base.
