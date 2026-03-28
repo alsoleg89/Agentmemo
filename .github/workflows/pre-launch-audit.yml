@@ -156,15 +156,25 @@ jobs:
           print("PASS: No dangerous patterns found")
           EOF
 
-      - name: Fail if any check failed
-        if: |
-          steps.ai_vocab.outcome == 'failure' ||
-          steps.sentence_rhythm.outcome == 'failure' ||
-          steps.commit_density.outcome == 'failure' ||
-          steps.security_scan.outcome == 'failure'
+      - name: Code checks summary
+        if: always()
         run: |
-          echo "One or more code checks failed — see steps above"
-          exit 1
+          AI="${{ steps.ai_vocab.outcome }}"
+          SR="${{ steps.sentence_rhythm.outcome }}"
+          CD="${{ steps.commit_density.outcome }}"
+          SS="${{ steps.security_scan.outcome }}"
+          echo "┌─────────────────────────────────┬──────────┐"
+          echo "│ Check                           │ Result   │"
+          echo "├─────────────────────────────────┼──────────┤"
+          echo "│ AI vocabulary                   │ $AI"
+          echo "│ Sentence rhythm                 │ $SR"
+          echo "│ Commit density                  │ $CD"
+          echo "│ Security patterns               │ $SS"
+          echo "└─────────────────────────────────┴──────────┘"
+          if [ "$AI" != "success" ] || [ "$SR" != "success" ] || \
+             [ "$CD" != "success" ] || [ "$SS" != "success" ]; then
+            exit 1
+          fi
 
   # ── Summary ────────────────────────────────────────────────────────────────
   summary:
