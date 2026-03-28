@@ -1,6 +1,12 @@
 name: Publish to PyPI
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
   push:
     tags: ["v*"]
 
@@ -23,6 +29,9 @@ jobs:
 
       - name: Install build tools
         run: pip install hatch
+
+      - name: Set version
+        run: hatch version ${{ inputs.version || github.ref_name }}
 
       - name: Build package
         run: hatch build
