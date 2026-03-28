@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 class KnowledgeBase:
     """Agent knowledge store with extraction, retrieval, and forgetting.
 
-    Usage:
+    Usage::
+
         kb = KnowledgeBase(agent_id="my_agent")
         kb.add("User prefers Python", importance=0.9)
         context = kb.recall("what language?")
@@ -149,6 +150,15 @@ class KnowledgeBase:
             List of all Facts, in storage order.
         """
         return self._storage.load(self._agent_id)
+
+    def replace_facts(self, facts: list[Fact]) -> None:
+        """Replace all stored facts with the given list (used for import).
+
+        Args:
+            facts: New facts to store; replaces any existing facts.
+        """
+        self._storage.save(self._agent_id, facts)
+        logger.info("Replaced facts for agent '%s' (%d total)", self._agent_id, len(facts))
 
     def forget(self, fact_id: str) -> None:
         """Remove a specific fact by its ID.

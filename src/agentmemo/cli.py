@@ -162,25 +162,21 @@ def import_cmd(agent_id: str, input_file: str, data_dir: str) -> None:
         click.echo("No facts in file.")
         return
 
-    facts: list[Fact] = []
-    for fid, entry in raw.items():
-        facts.append(
-            Fact(
-                id=str(fid),
-                content=entry["content"],
-                type=MemoryType(entry["type"]),
-                importance=float(entry["importance"]),
-                retention_score=float(entry.get("retention_score", 1.0)),
-                access_count=int(entry.get("access_count", 0)),
-                tags=list(entry.get("tags", [])),
-                created_at=_parse_dt(entry["created_at"]),
-                last_accessed=_parse_dt(entry.get("last_accessed", entry["created_at"])),
-            )
+    facts: list[Fact] = [
+        Fact(
+            id=str(fid),
+            content=entry["content"],
+            type=MemoryType(entry["type"]),
+            importance=float(entry["importance"]),
+            retention_score=float(entry.get("retention_score", 1.0)),
+            access_count=int(entry.get("access_count", 0)),
+            tags=list(entry.get("tags", [])),
+            created_at=_parse_dt(entry["created_at"]),
+            last_accessed=_parse_dt(entry.get("last_accessed", entry["created_at"])),
         )
+        for fid, entry in raw.items()
+    ]
 
     kb = _make_kb(agent_id, data_dir)
-    kb.clear_all()
-    for fact in facts:
-        kb._storage.save(agent_id, facts)
-        break  # save once, not per fact
+    kb.replace_facts(facts)
     click.echo(f"Imported {len(facts)} facts for agent '{agent_id}'.")
