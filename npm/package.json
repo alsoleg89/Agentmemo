@@ -7,7 +7,7 @@
   "homepage": "https://github.com/alsoleg89/agentmemo#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/alsoleg89/agentmemo.git",
+    "url": "git+https://github.com/alsoleg89/agentmemo.git",
     "directory": "npm"
   },
   "bugs": {
