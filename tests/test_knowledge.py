@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
+from unittest.mock import patch
 
 import pytest
 
 from agentmemo.knowledge import KnowledgeBase
 from agentmemo.storage.yaml_storage import YAMLStorage
-from agentmemo.types import Fact, MemoryType
+from agentmemo.types import ConversationTurn, Fact, MemoryType
 
 
 @pytest.fixture
@@ -190,3 +192,46 @@ class TestRecallByTag:
         kb.add("Fact C", tags=["other"])
         results = kb.recall_by_tag("important")
         assert len(results) == 2
+
+
+class TestLearnApiKey:
+    """learn() must raise ValueError when no API key is available."""
+
+    def test_learn_raises_without_api_key(self, kb: KnowledgeBase) -> None:
+        turns = [ConversationTurn(role="user", content="Deploy on Fridays")]
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False),
+            pytest.raises(ValueError, match="No API key"),
+        ):
+            kb.learn(turns, provider="openai", api_key=None)
+
+    def test_learn_empty_turns_returns_empty_without_key(self, kb: KnowledgeBase) -> None:
+        # empty turns → early return before key check
+        result = kb.learn([], provider="openai", api_key=None)
+        assert result == []
+
+
+class TestRecallFactsWithScores:
+    """recall_facts_with_scores() returns (Fact, float) pairs."""
+
+    def test_returns_pairs(self, kb: KnowledgeBase) -> None:
+        kb.add("User deploys on Fridays")
+        pairs = kb.recall_facts_with_scores("deployment day")
+        assert len(pairs) >= 1
+        fact, score = pairs[0]
+        assert isinstance(fact, Fact)
+        assert isinstance(score, float)
+
+    def test_empty_kb_returns_empty(self, kb: KnowledgeBase) -> None:
+        assert kb.recall_facts_with_scores("anything") == []
+
+    def test_scores_are_non_negative(self, kb: KnowledgeBase) -> None:
+        kb.add("User prefers Python")
+        pairs = kb.recall_facts_with_scores("language")
+        assert all(score >= 0.0 for _, score in pairs)
+
+    def test_top_k_limits_results(self, kb: KnowledgeBase) -> None:
+        for i in range(10):
+            kb.add(f"Deployment fact {i}")
+        pairs = kb.recall_facts_with_scores("deployment", top_k=3)
+        assert len(pairs) <= 3

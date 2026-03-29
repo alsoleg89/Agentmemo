@@ -345,6 +345,16 @@ def _make_server(kb: KnowledgeBase) -> Any:
 
 def main() -> None:
     """Entry point for the agentmemo MCP server."""
+    try:
+        from mcp.server.fastmcp import FastMCP  # noqa: F401
+    except ImportError:
+        import sys
+
+        print(
+            "Error: mcp package not installed.\nInstall with: pip install 'agentmemo[mcp]'",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     kb = _build_kb()
     app = _make_server(kb)
     app.run()

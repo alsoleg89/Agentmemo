@@ -107,11 +107,12 @@ class TestOpenClawMemoryAdapter:
 
         assert adapter.get_all() == []
 
-    def test_search_score_is_none(self, adapter: OpenClawMemoryAdapter, kb: KnowledgeBase) -> None:
+    def test_search_score_is_float(self, adapter: OpenClawMemoryAdapter, kb: KnowledgeBase) -> None:
         kb.add("User prefers pytest")
         items = adapter.search("testing framework")
         assert len(items) >= 1, "Expected at least one result for 'testing framework'"
-        assert all(item["score"] is None for item in items)
+        assert all(isinstance(item["score"], float) for item in items)
+        assert all(item["score"] >= 0.0 for item in items)
 
     def test_add_multi_turn_warns(self, adapter: OpenClawMemoryAdapter) -> None:
         messages = [
@@ -139,6 +140,22 @@ class TestOpenClawMemoryAdapter:
         assert item["memory"] == "Replacement text"
         assert "id" in item
         assert "metadata" in item
+
+    def test_update_returned_id_differs_from_input(
+        self, adapter: OpenClawMemoryAdapter, kb: KnowledgeBase
+    ) -> None:
+        fact = kb.add("Old content")
+        result = adapter.update(fact.id, "New content")
+        assert result["id"] != fact.id
+
+    def test_update_old_id_no_longer_accessible(
+        self, adapter: OpenClawMemoryAdapter, kb: KnowledgeBase
+    ) -> None:
+        fact = kb.add("Old content")
+        new_item = adapter.update(fact.id, "New content")
+        with pytest.raises(KeyError):
+            adapter.get(fact.id)
+        assert adapter.get(new_item["id"])["memory"] == "New content"
 
 
 class TestGenerateMcpConfig:
@@ -170,3 +187,12 @@ class TestGenerateMcpConfig:
     def test_invalid_storage_raises(self) -> None:
         with pytest.raises(ValueError, match="sqlite.*yaml"):
             generate_mcp_config(storage="postgres")  # type: ignore[arg-type]
+
+    def test_raises_without_mcp_package(self) -> None:
+        from unittest.mock import patch
+
+        with (
+            patch.dict("sys.modules", {"mcp": None}),
+            pytest.raises(ImportError, match="agentmemo\\[mcp\\]"),
+        ):
+            generate_mcp_config()
