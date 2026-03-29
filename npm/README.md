@@ -1,6 +1,6 @@
-# @alsoleg89/agentmemo
+# @alsoleg/agentmemo
 
-![npm](https://img.shields.io/npm/v/@alsoleg89/agentmemo)
+![npm](https://img.shields.io/npm/v/@alsoleg/agentmemo)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 **Agent memory for Node.js and TypeScript.** Stores facts, retrieves what's relevant, forgets the rest.
@@ -17,7 +17,7 @@ TypeScript client for the [agentmemo](https://github.com/alsoleg89/agentmemo) Py
 ## Install
 
 ```bash
-npm install @alsoleg89/agentmemo
+npm install @alsoleg/agentmemo
 ```
 
 The postinstall script automatically runs `pip install "agentmemo[mcp]"`. If pip is not found, a warning is printed — install it manually:
@@ -31,7 +31,7 @@ pip install "agentmemo[mcp]"
 ## Quickstart
 
 ```typescript
-import { KnowledgeBase } from '@alsoleg89/agentmemo';
+import { KnowledgeBase } from '@alsoleg/agentmemo';
 
 const kb = new KnowledgeBase({
   agentId: 'my-agent',
