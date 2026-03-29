@@ -121,11 +121,10 @@ class OpenClawMemoryAdapter:
 
         Returns:
             List of MemoryItem dicts (id, memory, score, metadata).
-            ``score`` is always ``None`` — agentmemo does not expose a
-            per-query relevance score; filter by content, not score.
+            ``score`` is a hybrid relevance value (TF-IDF + retention + importance).
         """
-        facts = self._kb.recall_facts(query, top_k=top_k)
-        return [_fact_to_item(f, score=None) for f in facts]
+        pairs = self._kb.recall_facts_with_scores(query, top_k=top_k)
+        return [_fact_to_item(f, score=round(score, 4)) for f, score in pairs]
 
     def get(self, memory_id: str) -> dict[str, Any]:
         """Retrieve a specific memory by ID.
@@ -224,6 +223,13 @@ def generate_mcp_config(
     """
     if storage not in ("sqlite", "yaml"):
         raise ValueError(f"storage must be 'sqlite' or 'yaml', got {storage!r}")
+    try:
+        import mcp  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "mcp package is required to use agentmemo-mcp. "
+            "Install with: pip install 'agentmemo[mcp]'"
+        ) from exc
     return {
         "mcpServers": {
             "agentmemo": {

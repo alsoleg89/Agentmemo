@@ -316,6 +316,28 @@ class TestToolListSnapshots:
 
 
 # ---------------------------------------------------------------------------
+# tool_recall / tool_recall_json empty-state contract
+# ---------------------------------------------------------------------------
+
+
+class TestRecallEmptyContract:
+    """recall returns a human string; recall_json always returns valid JSON."""
+
+    def test_recall_empty_returns_message(self, kb: KnowledgeBase) -> None:
+        result = tool_recall(kb, "anything")
+        assert "No relevant facts" in result
+
+    def test_recall_json_empty_returns_valid_json_array(self, kb: KnowledgeBase) -> None:
+        result = tool_recall_json(kb, "anything")
+        assert json.loads(result) == []
+
+    def test_recall_json_never_raises_on_empty(self, kb: KnowledgeBase) -> None:
+        result = tool_recall_json(kb, "anything")
+        parsed = json.loads(result)  # must not raise JSONDecodeError
+        assert isinstance(parsed, list)
+
+
+# ---------------------------------------------------------------------------
 # _make_server — MCP wiring (mocked)
 # ---------------------------------------------------------------------------
 
