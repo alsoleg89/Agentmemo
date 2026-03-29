@@ -235,8 +235,13 @@ memory.update(results[0]["id"], "Deploy on Thursdays")
 memory.delete(results[0]["id"])
 ```
 
-> **Multi-turn extraction:** `add()` stores the last user message. For extracting multiple
-> facts from a full conversation, use `kb.learn(turns, api_key=...)` directly.
+> **Multi-turn extraction:** `add()` stores only the last user message and emits a warning
+> if the list has more than one user message. For extracting multiple facts from a full
+> conversation, use `kb.learn(turns, api_key=...)` directly.
+
+> **`update()` assigns a new ID.** The old fact is deleted and a new one is created.
+> If you need to hold a stable reference, call `delete()` + `add()` yourself and record
+> the returned ID.
 
 ---
 
@@ -281,6 +286,7 @@ turns = [
     ConversationTurn(role="assistant", content="Got it!"),
 ]
 kb.learn(turns, provider="openai")           # reads OPENAI_API_KEY from env
+# ↑ No key found? learn() returns [] silently — check logs for "No API key provided" warning
 kb.learn(turns, provider="openai",    api_key="sk-...")      # explicit key
 kb.learn(turns, provider="anthropic", api_key="sk-ant-...")  # Claude
 kb.learn(turns, provider="openai-compat",                    # any compatible API

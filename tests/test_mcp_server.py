@@ -291,7 +291,7 @@ class TestToolRecallJson:
 class TestToolListSnapshots:
     def test_list_snapshots_empty(self, kb: KnowledgeBase) -> None:
         result = tool_list_snapshots(kb)
-        assert result == "No snapshots saved."
+        assert json.loads(result) == []
 
     def test_list_snapshots_returns_names(self, tmp_path: pathlib.Path) -> None:
         from agentmemo.storage.yaml_storage import YAMLStorage

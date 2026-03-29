@@ -184,7 +184,7 @@ def tool_list_snapshots(kb: KnowledgeBase) -> str:
         names = kb.list_snapshots()
     except NotImplementedError as exc:
         return f"Snapshots not supported by this storage backend: {exc}"
-    return json.dumps(names, ensure_ascii=False) if names else "No snapshots saved."
+    return json.dumps(names, ensure_ascii=False) if names else "[]"
 
 
 def tool_snapshot(kb: KnowledgeBase, name: str) -> str:
