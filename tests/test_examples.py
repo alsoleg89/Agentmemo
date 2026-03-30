@@ -1,11 +1,16 @@
 """Tests for README examples — run without LLM API keys."""
 
+from __future__ import annotations
+
+import asyncio
 import pathlib
+from unittest.mock import patch
 
 import pytest
 
 from ai_knot import KnowledgeBase, MemoryType
 from ai_knot.storage import SQLiteStorage, YAMLStorage, create_storage
+from ai_knot.types import ConversationTurn
 
 
 @pytest.fixture
@@ -105,3 +110,100 @@ def test_recall_does_not_need_provider(kb: KnowledgeBase) -> None:
     kb.add("User deploys everything in Docker")
     context = kb.recall("how should I deploy this?")
     assert "Docker" in context
+
+
+# ── v0.4.0 examples ───────────────────────────────────────────────────────────
+
+
+def test_example9_add_many(tmp_path: pathlib.Path) -> None:
+    """add_many() inserts a batch of facts without an LLM call."""
+    kb = KnowledgeBase(agent_id="bot", storage=YAMLStorage(base_dir=str(tmp_path)))
+
+    # Plain strings use method-level defaults.
+    facts = kb.add_many(["User deploys on Fridays", "User uses Docker"])
+    assert len(facts) == 2
+    assert all(f.type == MemoryType.SEMANTIC for f in facts)
+
+    # Dicts allow per-fact control.
+    facts2 = kb.add_many(
+        [
+            {"content": "Always use type hints", "type": "procedural", "importance": 0.9},
+            {"content": "Sprint demo on Monday", "type": "episodic", "importance": 0.6},
+        ]
+    )
+    assert facts2[0].type == MemoryType.PROCEDURAL
+    assert pytest.approx(facts2[0].importance) == 0.9
+    assert facts2[1].type == MemoryType.EPISODIC
+
+    # All four facts were persisted in a single load+save.
+    assert kb.stats()["total_facts"] == 4
+
+    # Recall works normally over batch-inserted facts.
+    context = kb.recall("deployment schedule")
+    assert isinstance(context, str)
+
+
+def test_example10_provider_at_init(tmp_path: pathlib.Path) -> None:
+    """Provider credentials set at __init__ are used as defaults for learn()."""
+    kb = KnowledgeBase(
+        agent_id="bot",
+        storage=YAMLStorage(base_dir=str(tmp_path)),
+        provider="openai",
+        api_key="sk-test",
+    )
+    turns = [ConversationTurn(role="user", content="I deploy everything in Docker")]
+
+    # learn() uses init-time provider — no api_key= needed per call.
+    with patch("ai_knot.extractor.Extractor._call_llm", return_value=[]):
+        result = kb.learn(turns)
+    assert result == []
+
+    # Per-call values still override init-time defaults.
+    with patch("ai_knot.extractor.Extractor._call_llm", return_value=[]):
+        result2 = kb.learn(turns, provider="anthropic", api_key="sk-ant-other")
+    assert result2 == []
+
+
+def test_example11_async_api(tmp_path: pathlib.Path) -> None:
+    """arecall / arecall_facts are non-blocking async wrappers over sync methods."""
+    kb = KnowledgeBase(agent_id="bot", storage=YAMLStorage(base_dir=str(tmp_path)))
+    kb.add("User prefers Python")
+    kb.add("User deploys on Kubernetes")
+
+    # arecall returns the same string as recall.
+    context = asyncio.run(kb.arecall("deployment"))
+    assert isinstance(context, str)
+    assert len(context) > 0
+
+    # arecall_facts returns Fact objects.
+    facts = asyncio.run(kb.arecall_facts("language"))
+    assert isinstance(facts, list)
+
+    # alearn with mocked extractor — does not block the event loop.
+    turns = [ConversationTurn(role="user", content="I use FastAPI")]
+    with patch("ai_knot.extractor.Extractor._call_llm", return_value=[]):
+        result = asyncio.run(kb.alearn(turns, provider="openai", api_key="sk-test"))
+    assert result == []
+
+
+def test_example12_scored_retrieval(tmp_path: pathlib.Path) -> None:
+    """recall_facts_with_scores() returns (Fact, float) pairs with a hybrid score."""
+    kb = KnowledgeBase(agent_id="bot", storage=YAMLStorage(base_dir=str(tmp_path)))
+    kb.add("User deploys everything in Docker", importance=0.9)
+    kb.add("User prefers Python over Java", type=MemoryType.PROCEDURAL, importance=0.8)
+    kb.add("User works at Acme Corp", importance=0.7)
+
+    scored = kb.recall_facts_with_scores("Docker deployment", top_k=3)
+
+    assert len(scored) >= 1
+    for fact, score in scored:
+        assert score >= 0.0
+        assert isinstance(fact.content, str)
+
+    # Scores are sorted descending.
+    scores = [s for _, s in scored]
+    assert scores == sorted(scores, reverse=True)
+
+    # Threshold-based filtering works as a one-liner.
+    relevant = [fact for fact, score in scored if score >= 0.1]
+    assert len(relevant) >= 1

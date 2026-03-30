@@ -59,29 +59,34 @@ npm install ai-knot
 ## Quickstart (30 seconds)
 
 ```python
-from ai_knot import KnowledgeBase
+from ai_knot import KnowledgeBase, ConversationTurn
 
-kb = KnowledgeBase(agent_id="my_agent")
+# Configure provider once — no need to repeat api_key= on every call
+kb = KnowledgeBase(
+    agent_id="my_agent",
+    provider="openai",
+    api_key="sk-...",   # or set OPENAI_API_KEY in env
+)
 
-# Add facts manually
-kb.add("User is a senior backend developer at Acme Corp",
-       type="semantic", importance=0.95)
-kb.add("User prefers Python, dislikes async code",
-       type="procedural", importance=0.85)
+# Add facts manually — no LLM needed
+kb.add("User is a senior backend developer at Acme Corp", importance=0.95)
+kb.add("User prefers Python, dislikes async code", type="procedural", importance=0.85)
 
-# Or extract automatically from a conversation
-from ai_knot import ConversationTurn
+# Batch-insert multiple facts at once (v0.4.0)
+kb.add_many(["User deploys everything in Docker", "Stack: FastAPI + PostgreSQL"])
+
+# Or extract automatically from a conversation — uses the provider set at init
 turns = [
     ConversationTurn(role="user",      content="I deploy everything in Docker"),
     ConversationTurn(role="assistant", content="Got it, I'll use Docker examples"),
 ]
-kb.learn(turns, provider="openai", api_key="sk-...")  # LLM extracts + stores relevant facts
+kb.learn(turns)  # LLM extracts + stores relevant facts
 
 # At inference time — get what matters
 context = kb.recall("how should I write this deployment script?")
-# -> "[procedural] User prefers Python, dislikes async code
-#     [semantic]   User deploys everything in Docker
-#     [semantic]   User is a senior backend developer at Acme Corp"
+# → "[procedural] User prefers Python, dislikes async code
+#    [semantic]   User deploys everything in Docker
+#    [semantic]   User is a senior backend developer at Acme Corp"
 
 # Inject into your prompt
 response = openai_client.chat(...,
@@ -727,6 +732,67 @@ print(f"Avg importance: {stats['avg_importance']:.2f}")
 print(f"By type: {stats['by_type']}")
 
 kb.decay()  # apply Ebbinghaus forgetting curve — stale facts lose retention score
+```
+
+### 9. Batch fact insertion with `add_many()`
+
+```python
+from ai_knot import KnowledgeBase, MemoryType
+
+kb = KnowledgeBase(agent_id="assistant")
+
+# Plain strings — type/importance use method defaults
+kb.add_many([
+    "User deploys on Fridays",
+    "User uses Docker and Kubernetes",
+    "Stack: FastAPI + PostgreSQL",
+])
+
+# Dicts — full control per fact, mixed with strings
+kb.add_many(
+    [
+        {"content": "Always use type hints", "type": "procedural", "importance": 0.9},
+        {"content": "Sprint demo on Monday", "type": "episodic", "importance": 0.6},
+        "User works in UTC+3",   # string item uses method defaults
+    ],
+    type=MemoryType.SEMANTIC,   # default for string items
+    importance=0.75,
+)
+```
+
+All items are validated before any write — a bad item won't partially commit the batch.
+
+### 10. Async API for FastAPI / asyncio
+
+```python
+import asyncio
+from ai_knot import KnowledgeBase, ConversationTurn
+
+# Provider configured once at init
+kb = KnowledgeBase(agent_id="bot", provider="openai", api_key="sk-...")
+
+# ── FastAPI handler — event loop never blocked ────────────────────────────────
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.post("/message")
+async def handle_message(turns: list[ConversationTurn]) -> dict[str, str]:
+    await kb.alearn(turns)                          # LLM call in thread pool
+    context = await kb.arecall("current topic")     # storage read in thread pool
+    return {"context": context}
+
+# ── Concurrent extraction for multiple agents ─────────────────────────────────
+kb_a = KnowledgeBase(agent_id="agent_a", provider="openai", api_key="sk-...")
+kb_b = KnowledgeBase(agent_id="agent_b", provider="openai", api_key="sk-...")
+
+async def process_both() -> None:
+    await asyncio.gather(
+        kb_a.alearn(turns_a),
+        kb_b.alearn(turns_b),
+    )
+
+asyncio.run(process_both())
 ```
 
 ---
