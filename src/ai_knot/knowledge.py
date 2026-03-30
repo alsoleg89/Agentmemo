@@ -345,6 +345,31 @@ class KnowledgeBase:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.recall_facts(query, top_k=top_k))
 
+    def _recall_impl(self, query: str, *, top_k: int = 5) -> list[tuple[Fact, float]]:
+        """Shared implementation for all recall variants.
+
+        Loads facts, applies decay, searches, updates access metadata, and
+        persists the updated facts.  Returns (Fact, score) pairs sorted by
+        relevance; returns an empty list when there are no facts or no matches.
+        """
+        facts = self._storage.load(self._agent_id)
+        if not facts:
+            return []
+
+        facts = apply_decay(facts)
+        pairs = self._retriever.search(query, facts, top_k=top_k)
+        if not pairs:
+            return []
+
+        returned_ids = {f.id for f, _ in pairs}
+        now = datetime.now(UTC)
+        for fact in facts:
+            if fact.id in returned_ids:
+                fact.access_count += 1
+                fact.last_accessed = now
+        self._storage.save(self._agent_id, facts)
+        return pairs
+
     def recall(self, query: str, *, top_k: int = 5) -> str:
         """Retrieve relevant facts as a formatted string for prompt injection.
 
@@ -355,30 +380,10 @@ class KnowledgeBase:
         Returns:
             Formatted multi-line string, or "" if no facts found.
         """
-        facts = self._storage.load(self._agent_id)
-        if not facts:
-            return ""
-
-        # Apply decay before searching.
-        facts = apply_decay(facts)
-
-        pairs = self._retriever.search(query, facts, top_k=top_k)
+        pairs = self._recall_impl(query, top_k=top_k)
         if not pairs:
             return ""
-
-        results = [f for f, _ in pairs]
-
-        # Increment access_count on returned facts and persist.
-        returned_ids = {r.id for r in results}
-        now = datetime.now(UTC)
-        for fact in facts:
-            if fact.id in returned_ids:
-                fact.access_count += 1
-                fact.last_accessed = now
-        self._storage.save(self._agent_id, facts)
-
-        # Format for prompt injection.
-        lines = [f"[{r.type.value}] {r.content}" for r in results]
+        lines = [f"[{f.type.value}] {f.content}" for f, _ in pairs]
         return "\n".join(lines)
 
     def list_facts(self) -> list[Fact]:
@@ -402,24 +407,7 @@ class KnowledgeBase:
         Returns:
             List of relevant Facts (may be empty), sorted by relevance.
         """
-        facts = self._storage.load(self._agent_id)
-        if not facts:
-            return []
-
-        facts = apply_decay(facts)
-        pairs = self._retriever.search(query, facts, top_k=top_k)
-        if not pairs:
-            return []
-
-        results = [f for f, _ in pairs]
-        returned_ids = {r.id for r in results}
-        now = datetime.now(UTC)
-        for fact in facts:
-            if fact.id in returned_ids:
-                fact.access_count += 1
-                fact.last_accessed = now
-        self._storage.save(self._agent_id, facts)
-        return results
+        return [f for f, _ in self._recall_impl(query, top_k=top_k)]
 
     def recall_facts_with_scores(self, query: str, *, top_k: int = 5) -> list[tuple[Fact, float]]:
         """Like recall_facts() but also returns the relevance score for each fact.
@@ -435,23 +423,7 @@ class KnowledgeBase:
             List of (Fact, score) pairs sorted by relevance (most relevant first).
             Empty list if no facts stored or none match.
         """
-        facts = self._storage.load(self._agent_id)
-        if not facts:
-            return []
-
-        facts = apply_decay(facts)
-        pairs = self._retriever.search(query, facts, top_k=top_k)
-        if not pairs:
-            return []
-
-        returned_ids = {f.id for f, _ in pairs}
-        now = datetime.now(UTC)
-        for fact in facts:
-            if fact.id in returned_ids:
-                fact.access_count += 1
-                fact.last_accessed = now
-        self._storage.save(self._agent_id, facts)
-        return pairs
+        return self._recall_impl(query, top_k=top_k)
 
     def recall_by_tag(self, tag: str) -> list[Fact]:
         """Return all facts that carry the given tag.

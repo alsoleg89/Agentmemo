@@ -42,6 +42,7 @@ class Fact:
     importance: float = 0.8
     retention_score: float = 1.0
     access_count: int = 0
+    low_confidence: bool = False
     tags: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: uuid4().hex[:8])
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
