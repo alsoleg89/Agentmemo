@@ -131,27 +131,45 @@ class KnowledgeBase:
         Raises:
             ValueError: If any fact has empty content or an invalid importance.
         """
-        result: list[Fact] = []
+        if not facts:
+            return []
+
+        # Build and validate all Fact objects before touching storage so that
+        # a validation error on item N does not leave the first N-1 persisted.
+        new_facts: list[Fact] = []
         for item in facts:
             if isinstance(item, str):
-                result.append(self.add(item, type=type, importance=importance, tags=tags))
+                content = item
+                item_type = type
+                item_importance = importance
+                item_tags: list[str] = list(tags)
             else:
+                raw_content = item.get("content")
+                if not raw_content:
+                    raise ValueError("each dict item must include a non-empty 'content' key")
+                content = str(raw_content)
                 raw_type = item.get("type")
                 item_type = MemoryType(raw_type) if raw_type else type
                 item_importance = float(item.get("importance", importance))
                 raw_tags = item.get("tags", list(tags))
-                item_tags: list[str] | tuple[str, ...] = (
-                    raw_tags if isinstance(raw_tags, (list, tuple)) else list(tags)
+                item_tags = raw_tags if isinstance(raw_tags, (list, tuple)) else list(tags)  # type: ignore[assignment]
+
+            if not content.strip():
+                raise ValueError("content must not be empty")
+            if not 0.0 <= item_importance <= 1.0:
+                raise ValueError(
+                    f"importance must be between 0.0 and 1.0, got {item_importance}"
                 )
-                result.append(
-                    self.add(
-                        str(item["content"]),
-                        type=item_type,
-                        importance=item_importance,
-                        tags=item_tags,
-                    )
-                )
-        return result
+            new_facts.append(
+                Fact(content=content, type=item_type, importance=item_importance, tags=item_tags)
+            )
+
+        # Single load + save: O(1) storage round-trips regardless of list length.
+        existing = self._storage.load(self._agent_id)
+        existing.extend(new_facts)
+        self._storage.save(self._agent_id, existing)
+        logger.info("Added %d facts to agent '%s'", len(new_facts), self._agent_id)
+        return new_facts
 
     def learn(
         self,
@@ -288,7 +306,7 @@ class KnowledgeBase:
                 kb_b.alearn(turns_b, ...),
             )
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None,
             lambda: self.learn(
@@ -313,7 +331,7 @@ class KnowledgeBase:
         Returns:
             Formatted multi-line string, or "" if no facts found.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.recall(query, top_k=top_k))
 
     async def arecall_facts(self, query: str, *, top_k: int = 5) -> list[Fact]:
@@ -326,7 +344,7 @@ class KnowledgeBase:
         Returns:
             List of relevant Facts (may be empty), sorted by relevance.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.recall_facts(query, top_k=top_k))
 
     def recall(self, query: str, *, top_k: int = 5) -> str:
