@@ -1,3 +1,291 @@
+диагностика по итогам плана реализации 
+====
+# Ревью плана реализации (позиция: MIT, memory-for-agents)
+
+## 1) Краткий вывод
+
+Ваш план **сильный и практичный**: он сохраняет zero-dep core, не ломает `KnowledgeBase`, и убирает LLM-зависимость из hot path retrieval.
+
+Но для научной воспроизводимости есть 6 критичных доработок.
+
+---
+
+## 2) Что в плане уже правильно
+
+1. Верификация extraction в том же LLM-вызове (без дополнительного RTT).
+2. Отказ от LLM-reranker в online retrieval (сохранение latency SLA).
+3. Eval в `tests/`, а не в `src/` (не расширяет публичный API).
+4. CI-gates без API-ключей.
+5. Приоритеты в правильном порядке: extraction -> dedup -> retrieval -> eval -> CI.
+
+---
+
+## 3) Что нужно улучшить (критично)
+
+## Улучшение A — размер датасетов (20 кейсов недостаточно)
+
+### Проблема
+20 примеров на extraction/retrieval/dedup не дают статистической мощности для gate-решений.
+
+### Почему это важно (математика)
+Для пропорции при 95% доверии и погрешности ±5% нужно порядка:
+
+`n ≈ (1.96^2 * p * (1-p)) / e^2`
+
+При `p=0.8`, `e=0.05`: `n ≈ 246`.
+
+### Что сделать
+- extraction: минимум 250 кейсов;
+- retrieval: минимум 300 query-кейсов;
+- dedup: минимум 300 пар.
+
+## Улучшение B — self-verification bias в extraction
+
+### Проблема
+Если тот же LLM и извлекает факт, и ставит `supported=true`, модель может подтверждать собственные ошибки.
+
+### Что сделать
+- добавить rule-based check: `source_snippet` обязан быть буквальной подстрокой входного диалога;
+- если подстрока не найдена -> `supported=False`.
+
+Это дешёвый и детерминированный guardrail без новых зависимостей.
+
+## Улучшение C — dedup только по negation mismatch слаб для реальных кейсов
+
+### Проблема
+Отрицание через список слов не ловит:
+- имплицитные отрицания,
+- модальности ("rarely", "hardly"),
+- русско-английские миксы,
+- числовые противоречия.
+
+### Что сделать
+Без новых deps добавить 2 эвристики:
+1. **Numeric conflict**: разные числа при высоком Jaccard (`12 engineers` vs `20 engineers`).
+2. **Antonym micro-lexicon** для частых пар (`always/never`, `likes/dislikes`, `enabled/disabled`).
+
+## Улучшение D — нормировка TF-IDF через max(query) нестабильна
+
+### Проблема
+`tfidf_norm = tfidf / max_tfidf` чувствительна к выбросам в одном документе.
+
+### Что сделать
+- clip-порог: `tfidf_norm = min(1.0, tfidf / (p95_tfidf + eps))`;
+- `p95_tfidf` считать на scored docs текущего query.
+
+Это стабилизирует ranking при длинных хвостах распределения.
+
+## Улучшение E — веса retrieval нельзя «подобрать руками»
+
+### Проблема
+Фиксация весов без процедуры калибровки даст нестабильные результаты между доменами.
+
+### Что сделать
+Добавить deterministic grid-search в `tests/eval/runner.py`:
+- перебор `(w_tfidf, w_retention, w_importance)` с шагом 0.05;
+- ограничение `sum(w)=1`;
+- objective: max nDCG@10 с penalty на падение Precision@10.
+
+## Улучшение F — CI gate должен быть двухуровневым
+
+### Проблема
+Один eval job в PR может быть шумным (flake по данным/времени).
+
+### Что сделать
+- PR gate: «smoke-eval» на маленьком стабильном поднаборе;
+- nightly gate: полный eval корпус + bootstrap CI;
+- release gate: учитывает nightly, не только PR run.
+
+---
+
+## 4) Рекомендованная научная версия плана (обновлённая)
+
+## Phase 1 (2 недели): truthfulness guardrails
+- поля evidence в `Fact`;
+- substring-support проверка;
+- extraction eval >= 250 кейсов.
+
+## Phase 2 (2 недели): dedup robustness
+- negation + numeric + antonym heuristics;
+- dedup eval >= 300 пар.
+
+## Phase 3 (2 недели): retrieval calibration
+- p95-clipped tfidf normalization;
+- grid-search весов на retrieval-gold >= 300 запросов.
+
+## Phase 4 (1 неделя): CI hardening
+- PR smoke-eval;
+- nightly full-eval + bootstrap;
+- release gate от nightly артефактов.
+
+---
+
+## 5) Защита проекта на ученом совете (готовый тезис)
+
+### Тезис
+Мы выбрали минималистичную научную стратегию: **максимум причинной верификации при нулевом росте runtime-зависимостей**.
+
+### Почему совет должен одобрить
+1. План совместим с философией ai-knot (zero-dep core, latency-aware retrieval).
+2. Улучшения фокусируются на главном узком месте: достоверность памяти.
+3. Каждое изменение имеет измеримый критерий и статистический тест.
+4. Риски ложных «улучшений» снижены за счёт двухуровневых gates.
+
+### Формальное условие принятия
+- принимаем изменение только если:
+  - `CI_low(Δmetric) > 0`,
+  - и hard-gates не нарушены (`Faithfulness >= 0.80`, `A/B delta > 0`).
+
+---
+
+## 6) Один абзац «что делать прямо сейчас»
+
+Сразу расширить extraction на evidence-поля + substring-support guardrail, затем увеличить gold-наборы до статистически валидных размеров и только после этого калибровать retrieval-веса grid-search'ем; иначе любые CI-gates будут формально красивыми, но научно слабыми.
+
+====
+# Peer-review плана реализации (научный разбор + защита на ученом совете)
+
+## 0) Позиция
+
+План в целом правильный и совместим с философией ai-knot (zero-dep core, TF-IDF default, KnowledgeBase API).
+Но в текущем виде есть 6 критичных риска, которые могут сорвать достижение целевых метрик.
+
+---
+
+## 1) Что в плане сильное (оставить)
+
+1. Evidence в extraction без дополнительного LLM round-trip.
+2. Отказ от LLM reranker в online-path (соблюдение latency SLA).
+3. Eval-модуль в `tests/`, а не в публичном `src/`.
+4. CI-gates без API-ключей и без сетевых вызовов.
+5. Пошаговый rollout (truthfulness -> dedup -> retrieval -> eval -> CI).
+
+---
+
+## 2) Что нужно улучшить (критические замечания)
+
+## Замечание A — `supported=True` по умолчанию искажает Faithfulness
+
+Если `Fact.supported=True` по дефолту, то manually-added и исторические факты искусственно улучшают метрику faithfulness.
+Это создаёт optimistic bias в отчётах.
+
+**Исправление:**
+- добавить поле `verification_source: Literal["llm", "manual", "legacy"]`;
+- в eval считать faithfulness **только по `verification_source="llm"`**;
+- `manual/legacy` не смешивать в extraction-quality denominator.
+
+## Замечание B — фильтр `if f.supported` может убить Completeness
+
+Жёсткое удаление unsupported фактов увеличит precision, но может резко снизить completeness.
+
+**Исправление:**
+- двухпороговая политика:
+  - `support_confidence >= τ_high` -> store main;
+  - `τ_low <= conf < τ_high` -> store quarantine;
+  - `< τ_low` -> drop.
+- на retrieval использовать только main store.
+- quarantine использовать для оффлайн анализа ошибок.
+
+## Замечание C — negation heuristic недостаточен для contradiction
+
+Проверка по списку отрицаний даёт высокий FN на имплицитных противоречиях и multilingual фразах.
+
+**Исправление:**
+- оставить negation heuristic как Stage-0 (дешёвый флаг);
+- добавить deterministic Stage-1:
+  - шаблоны модальности/времени/чисел (`always/never`, даты, counts),
+  - симметричная проверка entailment-lite через rule-set;
+- contradiction label хранить явно в факте (`conflict_with: list[str]`).
+
+## Замечание D — нормировка TF-IDF через max() нестабильна
+
+`tfidf_norm = tfidf / max_tfidf` чувствительна к выбросам и меняет ранги при добавлении одного документа.
+
+**Исправление:**
+- использовать percentile normalization (p95) или z-score clipping;
+- валидировать стабильность ranking через Kendall tau на контрольном наборе.
+
+## Замечание E — SQLite миграция `ADD COLUMN IF NOT EXISTS`
+
+На части окружений SQLite это ломается (версии/диалекты).
+
+**Исправление:**
+- миграцию делать через `PRAGMA table_info(facts)` и условный `ALTER TABLE ADD COLUMN`.
+- миграцию покрыть тестом на переоткрытие БД.
+
+## Замечание F — пороги нужно развести на Phase-1 и Prod
+
+Порог `Faithfulness >= 0.95` сразу после первого шага может блокировать команду и демотивировать.
+
+**Исправление:**
+- Phase-1 gate: `F >= 0.85`, `C >= 0.70`;
+- Release gate: `F >= 0.95`, `C >= 0.80`;
+- переход между фазами — только после стабильности 2 релиза.
+
+---
+
+## 3) Исправленный научный протокол (минимальный, но достаточный)
+
+1. **Pre-registered hypotheses** (до кода):
+   - H1: evidence-gating ↑Faithfulness.
+   - H2: refined dedup ↑precision/recall dedup.
+   - H3: calibrated retrieval ↑P@10/R@10.
+
+2. **Datasets split**:
+   - train/dev/test без утечки по пользователям и времени.
+   - temporal holdout обязателен.
+
+3. **Metrics with uncertainty**:
+   - bootstrap CI 95% для каждой метрики.
+   - решение о merge: `CI_low(Δ) > 0` для целевой метрики.
+
+4. **Failure taxonomy**:
+   - extraction hallucination,
+   - dedup false-merge,
+   - dedup false-split,
+   - retrieval false-positive,
+   - retrieval false-negative.
+
+5. **Rollback policy**:
+   - если 2 consecutive runs ниже hard-gate — rollback автоматически.
+
+---
+
+## 4) Что поменять в вашем плане прямо сейчас (точечно)
+
+1. В шаге 1 заменить `supported=True` default на явный `verification_source` и сегрегацию метрик.
+2. Добавить quarantine поток и двухпороговый фильтр по confidence.
+3. В шаге 2 расширить contradiction detection beyond negation words.
+4. В шаге 3 заменить `max`-нормировку TF-IDF на percentile normalization.
+5. В шаге 4 добавить uncertainty reporting (CI) как обязательный output runner.
+6. В шаге 5 добавить rollback-триггер по двум последовательным фейлам.
+
+---
+
+## 5) Защита на ученом совете
+
+### Тезис
+Мы превращаем план из «инженерного списка задач» в **валидируемую научно-инженерную программу**,
+где каждое изменение:
+- имеет гипотезу,
+- имеет метрику,
+- имеет статистическую неопределённость,
+- имеет критерий принятия/отката.
+
+### Ключевые аргументы для совета
+
+1. Мы не ломаем философию ai-knot: zero-dep core и TF-IDF default сохраняются.
+2. Мы избегаем ложного прогресса: confidence-aware gating + uncertainty-aware decisions.
+3. Мы повышаем воспроизводимость: eval в tests, без внешних API и скрытых стохастик.
+4. Мы управляем риском: phase-gates + rollback policy.
+
+### Решение совета (рекомендуемое)
+
+Одобрить план **с указанными 6 поправками**, иначе риск недостижения метрик остаётся высоким,
+особенно по completeness и dedup contradiction handling.
+
+=====
+
 # Глубокая диагностика проекта: почему метрики не достигнуты и что делать
 
 ## 1) Что сейчас есть в коде (факты)
