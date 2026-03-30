@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import pathlib
+import sys
+from unittest.mock import MagicMock
 
 import pytest
 
 from ai_knot.integrations.openclaw import OpenClawMemoryAdapter, generate_mcp_config
 from ai_knot.knowledge import KnowledgeBase
 from ai_knot.storage.yaml_storage import YAMLStorage
+
+
+@pytest.fixture
+def _mcp_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inject a mock mcp module so generate_mcp_config() doesn't need the real package."""
+    monkeypatch.setitem(sys.modules, "mcp", MagicMock())
 
 
 @pytest.fixture
@@ -159,7 +167,7 @@ class TestOpenClawMemoryAdapter:
 
 
 class TestGenerateMcpConfig:
-    def test_defaults(self) -> None:
+    def test_defaults(self, _mcp_available: None) -> None:
         cfg = generate_mcp_config()
 
         assert cfg["mcpServers"]["ai-knot"]["command"] == "ai-knot-mcp"
@@ -168,7 +176,7 @@ class TestGenerateMcpConfig:
         assert env["AI_KNOT_DATA_DIR"] == ".ai_knot"
         assert env["AI_KNOT_STORAGE"] == "sqlite"
 
-    def test_custom_params(self) -> None:
+    def test_custom_params(self, _mcp_available: None) -> None:
         cfg = generate_mcp_config(agent_id="bot_a", data_dir="/data/mem", storage="yaml")
 
         env = cfg["mcpServers"]["ai-knot"]["env"]
@@ -176,7 +184,7 @@ class TestGenerateMcpConfig:
         assert env["AI_KNOT_DATA_DIR"] == "/data/mem"
         assert env["AI_KNOT_STORAGE"] == "yaml"
 
-    def test_is_json_serialisable(self) -> None:
+    def test_is_json_serialisable(self, _mcp_available: None) -> None:
         import json
 
         cfg = generate_mcp_config("agent_x")
