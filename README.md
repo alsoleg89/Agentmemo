@@ -471,6 +471,80 @@ Edit it by hand. Commit it to Git. Roll back when needed.
 
 ---
 
+## Batch fact insertion — `add_many()`
+
+Insert multiple pre-extracted facts in a single storage round-trip, without any LLM call:
+
+```python
+# Plain strings — use method-level defaults for type/importance/tags
+kb.add_many(["User deploys on Fridays", "User uses Docker", "Stack: Python + FastAPI"])
+
+# Dicts for full control per fact
+kb.add_many([
+    {"content": "User is a senior backend engineer", "type": "semantic", "importance": 0.95},
+    {"content": "Always use type hints", "type": "procedural", "importance": 0.8},
+    {"content": "Sprint demo went well", "type": "episodic", "importance": 0.6},
+])
+
+# Mix strings and dicts — strings use method defaults
+kb.add_many(
+    ["Quick fact"],
+    type=MemoryType.PROCEDURAL,
+    importance=0.7,
+)
+```
+
+Useful when facts come from an external source, are pre-processed by another tool, or
+the LLM extraction step is handled upstream.
+
+---
+
+## Async API
+
+All blocking operations have `async` variants that run in a thread-pool executor,
+keeping the asyncio event loop free during LLM HTTP calls:
+
+| Sync | Async |
+|------|-------|
+| `kb.learn(turns, ...)` | `await kb.alearn(turns, ...)` |
+| `kb.recall(query)` | `await kb.arecall(query)` |
+| `kb.recall_facts(query)` | `await kb.arecall_facts(query)` |
+
+```python
+import asyncio
+from ai_knot import KnowledgeBase, ConversationTurn
+
+kb = KnowledgeBase(agent_id="bot", provider="openai", api_key="sk-...")
+
+# FastAPI handler — never blocks the event loop
+async def handle_message(turns: list[ConversationTurn]) -> str:
+    await kb.alearn(turns)
+    return await kb.arecall("current topic")
+
+# Concurrent extraction for multiple agents
+kb_a = KnowledgeBase(agent_id="a", provider="openai", api_key="sk-...")
+kb_b = KnowledgeBase(agent_id="b", provider="openai", api_key="sk-...")
+results = await asyncio.gather(
+    kb_a.alearn(turns_a),
+    kb_b.alearn(turns_b),
+)
+```
+
+---
+
+## `learn()` options: timeout and batch_size
+
+```python
+# Abort slow LLM calls after 10 seconds (default: 30 s)
+kb.learn(turns, provider="openai", api_key="sk-...", timeout=10.0)
+
+# Split long conversations into chunks of 10 turns per LLM call (default: 20)
+# Prevents silent fact loss when the LLM truncates a large JSON response
+kb.learn(turns, provider="openai", api_key="sk-...", batch_size=10)
+```
+
+---
+
 ## LLM providers
 
 ai-knot ships with 6 providers for fact extraction:

@@ -274,6 +274,22 @@ class TestAddMany:
         facts = kb.add_many(["Tagged fact"], tags=["work"])
         assert facts[0].tags == ["work"]
 
+    def test_add_many_single_storage_op(self, kb: KnowledgeBase) -> None:
+        """add_many persists all facts in one load+save, not N×2 ops."""
+        kb.add_many(["Fact A", "Fact B", "Fact C"])
+        stored = kb._storage.load(kb._agent_id)
+        assert len(stored) == 3
+
+    def test_add_many_missing_content_raises(self, kb: KnowledgeBase) -> None:
+        with pytest.raises(ValueError, match="content"):
+            kb.add_many([{"type": "semantic"}])
+
+    def test_add_many_validates_all_before_persisting(self, kb: KnowledgeBase) -> None:
+        """Validation failure on item N must not partially persist items 0..N-1."""
+        with pytest.raises(ValueError):
+            kb.add_many(["Valid fact", {"type": "semantic"}])  # second item missing content
+        assert kb._storage.load(kb._agent_id) == []
+
 
 class TestLearnDefaultProvider:
     """Provider config set at __init__ used as fallback in learn()."""
