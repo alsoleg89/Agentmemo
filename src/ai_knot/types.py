@@ -35,6 +35,9 @@ class Fact:
         id: Unique 8-char hex identifier.
         created_at: When the fact was first stored (UTC).
         last_accessed: When the fact was last retrieved (UTC).
+        low_confidence: True when the faithfulness filter detected insufficient
+            overlap between the extracted content and the source conversation.
+            Facts with low_confidence may contain LLM hallucinations.
     """
 
     content: str
@@ -46,6 +49,7 @@ class Fact:
     id: str = field(default_factory=lambda: uuid4().hex[:8])
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_accessed: datetime = field(default_factory=lambda: datetime.now(UTC))
+    low_confidence: bool = False
 
 
 @dataclass

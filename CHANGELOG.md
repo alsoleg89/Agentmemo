@@ -18,6 +18,56 @@ Versioning: [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.0] — 2026-03-30
+
+### Added
+
+- **Verbatim extraction mode** — `learn()` and `alearn()` now accept
+  `extraction_detail: Literal["compact", "verbatim"]` (default `"compact"`).
+  In `"verbatim"` mode the LLM is instructed to preserve exact numbers, character
+  limits, platform names, and specific constraints without paraphrasing.  Fixes
+  completeness score 1.0/5 on ToV rule extraction (benchmark S1).
+
+  ```python
+  facts = kb.learn(turns, extraction_detail="verbatim")
+  # Stores: "Telegram: посты до 4000 знаков, подзаголовки H2/H3"
+  # Not:    "использовать подзаголовки"
+  ```
+
+- **Faithfulness filter** — `learn()` accepts `faithfulness_filter: bool = False`.
+  When `True`, each extracted fact is compared to the source turns by key-word
+  overlap.  Facts where fewer than 20 % of key words (≥ 4 chars) appear in the
+  source are marked `Fact.low_confidence = True`.  Callers can filter:
+  `[f for f in facts if not f.low_confidence]`.
+
+- **`Fact.low_confidence` field** — new `bool = False` field on `Fact`.  Backward-
+  compatible; existing stored facts will read as `False` on load.
+
+- **Configurable decay speed (`stability_hours`)** — `KnowledgeBase.__init__` now
+  accepts `stability_hours: float = 48.0`.  The new default (48 h, was 336 h)
+  makes the forgetting curve visible within a day:  a fact with importance=0.2
+  retains ~10 % after 24 h; importance=0.9 retains ~62 %.  Pass
+  `stability_hours=336` to restore the conservative v0.4 preset.
+
+- **Russian morphological normalization** — `_tokenize` in `retriever.py` now
+  strips common Russian inflectional suffixes (`-ого`, `-ому`, `-ами`, `-ность`,
+  etc.) using a suffix table, no external dependencies.  Improves Recall@K for
+  Russian-language fact retrieval.
+
+### Changed
+
+- **Deduplication: Jaccard → TF-IDF cosine** — `deduplicate_facts()` and
+  `resolve_against_existing()` now use TF-IDF cosine similarity instead of
+  word-level Jaccard.  Cosine handles length-asymmetric duplicates (one sentence
+  extending another) better.  Default thresholds adjusted: `deduplicate_facts`
+  0.75 (was 0.8), `resolve_against_existing` 0.65 (was 0.7).
+
+- **Decay retrieval weight: `retention_score → retention_score²`** — the retention
+  component in the hybrid retrieval score is now squared, amplifying the difference
+  between fresh facts (0.9² = 0.81) and stale ones (0.3² = 0.09).
+
+---
+
 ## [0.4.0] — 2026-03-30
 
 ### Added

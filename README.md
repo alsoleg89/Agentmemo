@@ -420,9 +420,13 @@ ai-knot uses an Ebbinghaus-based decay curve:
 ```
 retention = e^(-time / stability)
 
-stability = 336h × importance × (1 + ln(1 + access_count))
--> high importance + frequently accessed = remembered for months
--> low importance + never accessed     = forgotten in days
+stability = stability_hours × importance × (1 + ln(1 + access_count))
+
+Default stability_hours = 48 h — forgetting visible within a day.
+Pass stability_hours=336 to restore the slow-forgetting preset from v0.4.
+
+-> high importance + frequently accessed = remembered for weeks
+-> low importance + never accessed       = forgotten within 2-3 days
 ```
 
 Facts accessed often get **reinforced**. Stale facts **fade automatically**.
@@ -547,6 +551,60 @@ kb.learn(turns, provider="openai", api_key="sk-...", timeout=10.0)
 # Prevents silent fact loss when the LLM truncates a large JSON response
 kb.learn(turns, provider="openai", api_key="sk-...", batch_size=10)
 ```
+
+---
+
+## Verbatim extraction mode
+
+By default `learn()` lets the LLM summarise extracted facts.  This is fine for general
+knowledge but loses specifics — `"Telegram: лонгриды до 4000 знаков, структурировать
+через подзаголовки H2/H3"` becomes `"использовать подзаголовки"`.
+
+Use `extraction_detail="verbatim"` when exact values matter:
+
+```python
+# ToV rules, editorial guidelines, constraints with specific numbers
+facts = kb.learn(turns, extraction_detail="verbatim")
+# Stores: "Telegram: посты до 4000 знаков, подзаголовки H2/H3"
+# Not:    "использовать подзаголовки"
+```
+
+---
+
+## Faithfulness filter
+
+When `faithfulness_filter=True`, each extracted fact is compared to the source conversation
+by key-word overlap.  Facts where fewer than 20 % of key words appear in the source are
+flagged `low_confidence=True` — potential LLM hallucinations.
+
+```python
+facts = kb.learn(turns, faithfulness_filter=True)
+
+# Keep only facts grounded in the conversation
+confident = [f for f in facts if not f.low_confidence]
+uncertain  = [f for f in facts if f.low_confidence]
+print(f"{len(confident)} confident, {len(uncertain)} low-confidence")
+```
+
+Facts are flagged, not dropped — you decide what to do with them.
+
+---
+
+## Decay speed — `stability_hours`
+
+The Ebbinghaus curve uses a configurable base stability.  The new default (48 h) makes
+forgetting visible within a day.  Use the conservative preset for very long-lived agents:
+
+```python
+# Default (v0.5+): decay visible within 24 h
+kb = KnowledgeBase(agent_id="bot")  # stability_hours=48
+
+# Conservative (v0.4 behavior): slow forgetting, ~2 weeks half-life
+kb = KnowledgeBase(agent_id="bot", stability_hours=336)
+```
+
+After 24 h with default settings (importance=0.8, 0 accesses):
+- `retention_score ≈ 0.54` → fact is still recalled but ranked lower than fresh ones
 
 ---
 

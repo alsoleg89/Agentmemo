@@ -7,7 +7,7 @@ import logging
 from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from ai_knot.extractor import Extractor, resolve_against_existing
 from ai_knot.forgetting import apply_decay
@@ -43,6 +43,11 @@ class KnowledgeBase:
         api_key: Default API key for the provider. Falls back to environment
             variables when not set.
         model: Default model override for the provider.
+        stability_hours: Base stability constant for the Ebbinghaus decay curve
+            (in hours).  Smaller values make forgetting more visible sooner.
+            Default 48 h — a fact with importance=0.8 retains ~54 % after 24 h
+            and ~30 % after 48 h.  Pass ``336`` for the conservative 2-week
+            preset used in ai-knot < 0.5.
         **provider_kwargs: Extra provider arguments stored as defaults for
             ``learn()`` (e.g. ``folder_id`` for Yandex, ``base_url`` for
             openai-compat).
@@ -56,6 +61,7 @@ class KnowledgeBase:
         provider: str | LLMProvider | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        stability_hours: float = 48.0,
         **provider_kwargs: str,
     ) -> None:
         self._agent_id = agent_id
@@ -64,6 +70,7 @@ class KnowledgeBase:
         self._default_provider = provider
         self._default_api_key = api_key
         self._default_model = model
+        self._stability_hours = stability_hours
         self._default_provider_kwargs: dict[str, str] = dict(provider_kwargs)
 
     def add(
@@ -179,6 +186,8 @@ class KnowledgeBase:
         conflict_threshold: float = 0.7,
         timeout: float | None = None,
         batch_size: int = 20,
+        extraction_detail: Literal["compact", "verbatim"] = "compact",
+        faithfulness_filter: bool = False,
         **provider_kwargs: str,
     ) -> list[Fact]:
         """Extract and store facts from a conversation using an LLM.
@@ -200,12 +209,18 @@ class KnowledgeBase:
                 openai-compat.
             model: Override the default model for this provider. Falls back to
                 the value set at init.
-            conflict_threshold: Jaccard similarity threshold above which a new
-                fact is treated as a duplicate of an existing one (0.0–1.0).
+            conflict_threshold: TF-IDF cosine similarity threshold above which a
+                new fact is treated as a duplicate of an existing one (0.0–1.0).
             timeout: Per-request timeout in seconds for LLM calls. ``None``
                 uses the provider's built-in default (30 s).
             batch_size: Maximum conversation turns sent per LLM call. Longer
                 conversations are split into batches to prevent JSON truncation.
+            extraction_detail: ``"compact"`` (default) — LLM summarises facts.
+                ``"verbatim"`` — LLM preserves exact numbers, limits, and
+                platform-specific constraints without paraphrasing.
+            faithfulness_filter: When ``True``, marks facts whose key words
+                have < 20 % overlap with source turns as ``low_confidence=True``.
+                Helps surface potential LLM hallucinations for downstream review.
             **provider_kwargs: Extra args forwarded to the provider constructor
                 (e.g. ``folder_id`` for Yandex, ``base_url`` for openai-compat).
                 Merged with any defaults set at init, with per-call values taking
@@ -248,6 +263,8 @@ class KnowledgeBase:
                 model=resolved_model,
                 timeout=timeout,
                 batch_size=batch_size,
+                extraction_detail=extraction_detail,
+                faithfulness_filter=faithfulness_filter,
                 **resolved_kwargs,
             )
         else:
@@ -256,6 +273,8 @@ class KnowledgeBase:
                 model=resolved_model,
                 timeout=timeout,
                 batch_size=batch_size,
+                extraction_detail=extraction_detail,
+                faithfulness_filter=faithfulness_filter,
             )
 
         new_facts = extractor.extract(turns)
@@ -285,6 +304,8 @@ class KnowledgeBase:
         conflict_threshold: float = 0.7,
         timeout: float | None = None,
         batch_size: int = 20,
+        extraction_detail: Literal["compact", "verbatim"] = "compact",
+        faithfulness_filter: bool = False,
         **provider_kwargs: str,
     ) -> list[Fact]:
         """Async variant of :meth:`learn` — non-blocking for asyncio applications.
@@ -315,6 +336,8 @@ class KnowledgeBase:
                 conflict_threshold=conflict_threshold,
                 timeout=timeout,
                 batch_size=batch_size,
+                extraction_detail=extraction_detail,
+                faithfulness_filter=faithfulness_filter,
                 **provider_kwargs,
             ),
         )
@@ -360,7 +383,7 @@ class KnowledgeBase:
             return ""
 
         # Apply decay before searching.
-        facts = apply_decay(facts)
+        facts = apply_decay(facts, base_hours=self._stability_hours)
 
         pairs = self._retriever.search(query, facts, top_k=top_k)
         if not pairs:
@@ -489,7 +512,7 @@ class KnowledgeBase:
         facts = self._storage.load(self._agent_id)
         if not facts:
             return
-        apply_decay(facts)
+        apply_decay(facts, base_hours=self._stability_hours)
         self._storage.save(self._agent_id, facts)
         logger.debug("Applied decay to %d facts for agent '%s'", len(facts), self._agent_id)
 

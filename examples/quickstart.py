@@ -1,10 +1,12 @@
-"""ai-knot quickstart — minimal working example."""
+"""ai-knot quickstart — minimal working example covering v0.5.0 features."""
 
 import shutil
 
 from ai_knot import KnowledgeBase, MemoryType
 
 # ── 1. Add facts one at a time ────────────────────────────────────────────────
+# stability_hours=48 (default): decay visible within a day.
+# Pass stability_hours=336 to restore the slower v0.4 preset.
 kb = KnowledgeBase(agent_id="demo")
 
 kb.add("User is a senior backend developer at Acme Corp", importance=0.95)
@@ -38,7 +40,8 @@ print()
 print("=== Scored retrieval: 'Docker deployment' ===")
 scored = kb.recall_facts_with_scores("Docker deployment", top_k=3)
 for fact, score in scored:
-    print(f"  [{score:.2f}] [{fact.type.value}] {fact.content}")
+    prefix = "[!]" if fact.low_confidence else "   "
+    print(f"  {prefix} [{score:.2f}] [{fact.type.value}] {fact.content}")
 
 print()
 
@@ -48,20 +51,39 @@ print(f"  Facts above 0.3 threshold: {len(relevant)}")
 
 print()
 
-# ── 5. Provider config at init — set credentials once (v0.4.0) ───────────────
+# ── 5. Verbatim extraction mode (v0.5.0) ─────────────────────────────────────
+# Use extraction_detail="verbatim" when exact numbers and constraints matter.
+# The LLM preserves specific values instead of paraphrasing.
+#
+#   # Compact (default): "использовать подзаголовки"
+#   facts = kb.learn(tov_turns, extraction_detail="compact")
+#
+#   # Verbatim: "Telegram: посты до 4000 знаков, подзаголовки H2/H3"
+#   facts = kb.learn(tov_turns, extraction_detail="verbatim")
+
+# ── 6. Faithfulness filter (v0.5.0) ──────────────────────────────────────────
+# Flags facts whose key words don't appear in the source turns.
+# Useful to surface potential LLM hallucinations.
+#
+#   facts = kb.learn(turns, faithfulness_filter=True)
+#   confident = [f for f in facts if not f.low_confidence]
+#   uncertain  = [f for f in facts if f.low_confidence]
+
+# ── 7. Provider config at init — set credentials once (v0.4.0) ───────────────
 # In production you'd do this instead of passing api_key= on every learn() call:
 #
 #   kb_prod = KnowledgeBase(
 #       agent_id="assistant",
 #       provider="openai",
 #       api_key="sk-...",       # or reads OPENAI_API_KEY from env
+#       stability_hours=48,     # default: decay visible within a day
 #   )
-#   kb_prod.learn(turns_a)     # no credentials needed per call
-#   kb_prod.learn(turns_b)
+#   kb_prod.learn(turns_a)                             # no credentials needed
+#   kb_prod.learn(turns_b, extraction_detail="verbatim")  # preserve exact values
 #
 # Supported providers: openai, anthropic, gigachat, yandex, qwen, openai-compat
 
-# ── 6. Async API — non-blocking for FastAPI / asyncio (v0.4.0) ───────────────
+# ── 8. Async API — non-blocking for FastAPI / asyncio (v0.4.0) ───────────────
 # All blocking operations have async variants:
 #
 #   facts = await kb.alearn(turns, provider="openai", api_key="sk-...")
@@ -72,10 +94,10 @@ print()
 #
 #   @app.post("/chat")
 #   async def chat(turns: list[ConversationTurn]) -> str:
-#       await kb.alearn(turns)
+#       await kb.alearn(turns, extraction_detail="verbatim")
 #       return await kb.arecall("current topic")
 
-# ── 7. Stats and decay ────────────────────────────────────────────────────────
+# ── 9. Stats and decay ────────────────────────────────────────────────────────
 stats = kb.stats()
 print("=== Stats ===")
 print(f"Total facts: {stats['total_facts']}")
