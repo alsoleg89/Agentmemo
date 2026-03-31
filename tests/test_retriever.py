@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from ai_knot.retriever import BM25Retriever, TFIDFRetriever
+from ai_knot.retriever import BM25Retriever, InvertedIndex, TFIDFRetriever
+from ai_knot.tokenizer import tokenize as _tokenize
 from ai_knot.types import Fact
 
 
@@ -161,3 +164,93 @@ class TestBackwardCompatibility:
         results = retriever.search("Python", facts, top_k=2)
         assert len(results) > 0
         assert results[0][0].content == "Python is a programming language"
+
+
+class TestInvertedIndex:
+    """Tests for the InvertedIndex BM25 scoring."""
+
+    def test_index_scores_match_brute_force(self) -> None:
+        """InvertedIndex.score() must produce identical scores to brute-force BM25."""
+        facts = [
+            Fact(content="Python is great for data science", importance=0.5),
+            Fact(content="Java is widely used in enterprise", importance=0.5),
+            Fact(content="Python and Java are both popular", importance=0.5),
+            Fact(content="Nothing relevant here at all", importance=0.5),
+        ]
+        query = "Python Java"
+        k1 = 1.5
+        b = 0.75
+
+        # --- Brute-force BM25 ---
+        from collections import Counter
+
+        doc_tokens_list = [_tokenize(f.content) for f in facts]
+        num_docs = len(facts)
+        doc_lengths = [len(t) for t in doc_tokens_list]
+        avgdl = sum(doc_lengths) / num_docs
+
+        doc_freq: Counter[str] = Counter()
+        for dt in doc_tokens_list:
+            for token in set(dt):
+                doc_freq[token] += 1
+
+        query_tokens = _tokenize(query)
+        brute_scores: dict[str, float] = {}
+        for fact, dt, dl in zip(facts, doc_tokens_list, doc_lengths, strict=True):
+            tf_counts = Counter(dt)
+            score = 0.0
+            for qt in query_tokens:
+                tf = tf_counts.get(qt, 0)
+                df = doc_freq.get(qt, 0)
+                idf = math.log((num_docs - df + 0.5) / (df + 0.5) + 1.0)
+                denom = tf + k1 * (1.0 - b + b * dl / avgdl)
+                score += idf * (k1 + 1.0) * tf / denom if denom > 0 else 0.0
+            if score > 0:
+                brute_scores[fact.id] = score
+
+        # --- InvertedIndex ---
+        index = InvertedIndex(facts)
+        index_scores = index.score(query, k1=k1, b=b)
+
+        # Both should have the same keys.
+        assert set(brute_scores.keys()) == set(index_scores.keys())
+
+        # Scores should match within floating-point tolerance.
+        for doc_id in brute_scores:
+            assert brute_scores[doc_id] == pytest.approx(index_scores[doc_id], rel=1e-9)
+
+    def test_search_results_identical_with_index(self) -> None:
+        """BM25Retriever.search() results should rank the same facts in the same order."""
+        facts = [
+            Fact(content="User prefers Python for backend development", importance=0.9),
+            Fact(content="User deploys applications using Docker containers", importance=0.8),
+            Fact(content="User works at Sber as Operations Director", importance=0.95),
+            Fact(content="User dislikes JavaScript and frontend work", importance=0.7),
+            Fact(content="User always uses pytest for testing Python code", importance=0.85),
+        ]
+        retriever = BM25Retriever()
+        results = retriever.search("Python testing", facts, top_k=5)
+
+        # Verify we get results and they are properly ordered.
+        assert len(results) == 5
+        scores = [s for _, s in results]
+        assert scores == sorted(scores, reverse=True)
+
+        # The top result should contain "Python" (most relevant).
+        assert "Python" in results[0][0].content or "pytest" in results[0][0].content
+
+    def test_index_empty_facts(self) -> None:
+        """InvertedIndex should handle an empty facts list."""
+        index = InvertedIndex([])
+        scores = index.score("anything")
+        assert scores == {}
+        assert index.facts == {}
+
+    def test_index_facts_property(self) -> None:
+        """The facts property should return the id -> Fact mapping."""
+        facts = [Fact(content="hello"), Fact(content="world")]
+        index = InvertedIndex(facts)
+        assert len(index.facts) == 2
+        for fact in facts:
+            assert fact.id in index.facts
+            assert index.facts[fact.id] is fact

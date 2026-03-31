@@ -8,7 +8,6 @@ importance to favor fresh, important facts.
 from __future__ import annotations
 
 import math
-from collections import Counter
 
 from ai_knot.tokenizer import tokenize as _tokenize
 from ai_knot.types import Fact
@@ -23,6 +22,70 @@ _BM25_K1: float = 1.5  # Term saturation parameter.
 _BM25_B: float = 0.75  # Length normalization parameter.
 
 
+class InvertedIndex:
+    """Pre-computed inverted index for BM25 scoring.
+
+    Builds once from a list of facts, then supports fast query lookups.
+    Only the posting lists for query terms are traversed — O(Q * avg_postings)
+    instead of O(N * Q).
+    """
+
+    def __init__(self, facts: list[Fact]) -> None:
+        self._facts: dict[str, Fact] = {}  # id -> Fact
+        self._doc_lengths: dict[str, int] = {}  # id -> token count
+        self._postings: dict[str, dict[str, int]] = {}  # term -> {doc_id: tf}
+        self._doc_count: int = 0
+        self._avg_dl: float = 0.0
+        self._build(facts)
+
+    def _build(self, facts: list[Fact]) -> None:
+        total_length = 0
+        for fact in facts:
+            self._facts[fact.id] = fact
+            tokens = _tokenize(fact.content)
+            self._doc_lengths[fact.id] = len(tokens)
+            total_length += len(tokens)
+
+            # Build term frequencies.
+            tf_map: dict[str, int] = {}
+            for token in tokens:
+                tf_map[token] = tf_map.get(token, 0) + 1
+
+            # Update postings.
+            for term, tf in tf_map.items():
+                if term not in self._postings:
+                    self._postings[term] = {}
+                self._postings[term][fact.id] = tf
+
+        self._doc_count = len(facts)
+        self._avg_dl = total_length / self._doc_count if self._doc_count else 1.0
+
+    def score(self, query: str, *, k1: float = 1.5, b: float = 0.75) -> dict[str, float]:
+        """Return BM25 scores for all documents matching any query term."""
+        query_tokens = _tokenize(query)
+        scores: dict[str, float] = {}
+        n = self._doc_count
+
+        for term in query_tokens:
+            postings = self._postings.get(term)
+            if not postings:
+                continue
+            df = len(postings)
+            idf = math.log((n - df + 0.5) / (df + 0.5) + 1.0)
+
+            for doc_id, tf in postings.items():
+                dl = self._doc_lengths[doc_id]
+                tf_score = (k1 + 1.0) * tf / (tf + k1 * (1.0 - b + b * dl / self._avg_dl))
+                scores[doc_id] = scores.get(doc_id, 0.0) + idf * tf_score
+
+        return scores
+
+    @property
+    def facts(self) -> dict[str, Fact]:
+        """Return the id -> Fact mapping."""
+        return self._facts
+
+
 class BM25Retriever:
     """Zero-dependency BM25 (Okapi BM25) search over a list of Facts.
 
@@ -33,7 +96,13 @@ class BM25Retriever:
       hybrid = w1*bm25_normalized + w2*retention + w3*importance
     """
 
-    def search(self, query: str, facts: list[Fact], *, top_k: int = 5) -> list[tuple[Fact, float]]:
+    def search(
+        self,
+        query: str,
+        facts: list[Fact],
+        *,
+        top_k: int = 5,
+    ) -> list[tuple[Fact, float]]:
         """Find the most relevant facts for a query.
 
         Args:
@@ -48,73 +117,32 @@ class BM25Retriever:
         if not facts or not query.strip():
             return [(f, 0.0) for f in facts[:top_k]] if facts else []
 
-        query_tokens = _tokenize(query)
-        if not query_tokens:
-            return [(f, 0.0) for f in facts[:top_k]]
-
-        # Tokenize all documents.
-        doc_tokens_list: list[list[str]] = [_tokenize(fact.content) for fact in facts]
-
-        num_docs = len(facts)
-
-        # Compute average document length.
-        doc_lengths = [len(tokens) for tokens in doc_tokens_list]
-        avgdl = sum(doc_lengths) / num_docs if num_docs > 0 else 1.0
-
-        # Count how many documents contain each token (document frequency).
-        doc_freq: Counter[str] = Counter()
-        for doc_tokens in doc_tokens_list:
-            for token in set(doc_tokens):
-                doc_freq[token] += 1
-
-        # Compute raw BM25 scores.
-        raw_bm25: list[float] = []
-        for doc_tokens, dl in zip(doc_tokens_list, doc_lengths, strict=True):
-            if not doc_tokens:
-                raw_bm25.append(0.0)
-                continue
-
-            tf_counts = Counter(doc_tokens)
-            bm25_score = 0.0
-
-            for qt in query_tokens:
-                tf = tf_counts.get(qt, 0)
-                df = doc_freq.get(qt, 0)
-                # IDF with smoothing to avoid log(0).
-                idf = math.log((num_docs - df + 0.5) / (df + 0.5) + 1)
-                # BM25 term score with length normalization.
-                denom = tf + _BM25_K1 * (1.0 - _BM25_B + _BM25_B * dl / avgdl)
-                bm25_score += idf * (_BM25_K1 + 1) * tf / denom if denom > 0 else 0.0
-
-            raw_bm25.append(bm25_score)
+        # Build inverted index (could be cached in future).
+        index = InvertedIndex(facts)
+        raw_scores = index.score(query, k1=_BM25_K1, b=_BM25_B)
 
         # p95-clip normalization: clip to 95th percentile then normalize to [0, 1].
-        sorted_scores = sorted(raw_bm25)
-        p95_idx = int(0.95 * len(sorted_scores))
-        # If few docs, use max; otherwise use p95 value.
-        p95 = sorted_scores[p95_idx] if p95_idx < len(sorted_scores) else sorted_scores[-1]
+        if raw_scores:
+            sorted_vals = sorted(raw_scores.values())
+            n = len(sorted_vals)
+            p95_idx = min(int(0.95 * n), n - 1)
+            p95 = sorted_vals[p95_idx] if sorted_vals else 1.0
+        else:
+            p95 = 1.0
 
-        normalized_bm25: list[float] = []
-        for raw in raw_bm25:
-            if p95 > 0.0:
-                normalized_bm25.append(min(raw / p95, 1.0))
-            else:
-                normalized_bm25.append(0.0)
-
-        # Compute hybrid scores and collect (score, idx) pairs.
-        scored: list[tuple[float, int]] = []
-        for idx, (fact, norm_score) in enumerate(zip(facts, normalized_bm25, strict=True)):
+        results: list[tuple[Fact, float]] = []
+        for fact in facts:
+            bm25_raw = raw_scores.get(fact.id, 0.0)
+            bm25_norm = min(bm25_raw / p95, 1.0) if p95 > 0 else 0.0
             hybrid = (
-                _TFIDF_WEIGHT * norm_score
+                _TFIDF_WEIGHT * bm25_norm
                 + _RETENTION_WEIGHT * fact.retention_score
                 + _IMPORTANCE_WEIGHT * fact.importance
             )
-            scored.append((hybrid, idx))
+            results.append((fact, hybrid))
 
-        # Sort descending by score.
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        return [(facts[idx], score) for score, idx in scored[:top_k]]
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_k]
 
 
 # Backward compatibility alias.
