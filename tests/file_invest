@@ -1,3 +1,429 @@
+твоЯ роль и задача
+Действуй из роли профессора из MIT который знает python который написал докторскую по работе с памятью для агентов и которому очень понравился проект ai-knot 
+
+Посмотри на план и на анализ который уже был проведен 
+Предложи исходя из научных трудов и опыта -  что нужно улучшить 
+
+Потрать очень много времени - проведи глубинное исследование
+
+Защити потом свой проект на ученом совете состоящего из людей которые занимаются построением агентов
+
+Для построения технологически. - используй пять скиллов которые есть в проекте
+==========
+Цель
+Вот универсальные пороги для knowledge/memory системы в AI-контексте — применимые к любому агентному продукту:
+
+---
+
+### Группа 1 — Качество хранения (Extraction Quality)
+
+| Метрика | Минимум | Prod-ready | Как измерить |
+|---------|---------|------------|--------------|
+| **Faithfulness** | ≥ 0.80 | ≥ 0.95 | LLM judge: факт vs источник |
+| **Completeness** | ≥ 0.60 | ≥ 0.80 | % ключевых утверждений сохранено |
+| **Dedup precision** (FP rate) | ≤ 10% | ≤ 3% | разные факты → не сливаются |
+| **Dedup recall** | ≥ 70% | ≥ 90% | 50 парафраз → ≤5 хранится |
+
+Faithfulness — это первый hard gate. Галлюцинации при экстракции делают систему небезопасной для любого downstream агента.
+
+---
+
+### Группа 2 — Качество поиска (Retrieval Quality)
+
+| Метрика | Минимум | Prod-ready | Как измерить |
+|---------|---------|------------|--------------|
+| **Recall@10** | ≥ 0.75 | ≥ 0.90 | % релевантных фактов в top-10 |
+| **Precision@10** | ≥ 0.70 | ≥ 0.85 | % найденного что реально нужно |
+| **A/B answer delta** | > 0 | ≥ 0.10 | quality с памятью vs без памяти |
+
+A/B delta — второй hard gate. Если память не улучшает вывод агента по сравнению с "без памяти", её ценность нулевая независимо от всех остальных метрик.
+
+---
+
+### Группа 3 — Эффективность (Efficiency)
+
+| Метрика | Минимум | Prod-ready |
+|---------|---------|------------|
+| **Token reduction** | ≥ 20% | ≥ 50% |
+| **Retrieval P95** | < 200ms | < 50ms |
+| **Insert throughput** (с LLM) | ≥ 0.5 факт/с | ≥ 2 факт/с |
+
+Token reduction без деградации качества — core value prop. Если reduction 90% но completeness 1/5 — это антипаттерн.
+
+---
+
+### Трафик-светофор для go/no-go
+
+```
+🔴 Блокер (нельзя в prod):
+   Faithfulness < 0.80  ИЛИ  A/B delta = 0
+
+🟡 Риск (можно в prod с мониторингом):
+   Recall@10 < 0.90  ИЛИ  Completeness < 0.80  ИЛИ  FP rate > 5%
+
+🟢 Prod-ready:
+   Все метрики выше порога Prod-ready
+```
+
+---
+
+
+=======
+План реализации
+Context
+Диагностические документы указывают на одни и те же системные проблемы:
+
+факты сохраняются без верификации источника (Faithfulness не контролируется)
+dedup работает только по word-level Jaccard (высокие FP и FN)
+retriever имеет жёстко зашитые веса без калибровки
+нет eval-слоя и CI-гейтов по целевым метрикам
+
+Математически: Utility ≈ F * C * R * P — провал любого множителя обнуляет итог.
+Ревью применено: 5 скиллов + 2 peer-review + 4 технических замечания (R2–R5).
+
+Ограничения (из 5 скиллов — не нарушать)
+СкиллОграничениеarchitectГраф: types ← storage ← forgetting/retriever/extractor ← knowledge ← cli/integrations. KnowledgeBase — единственный публичный API.architectНулевые обязательные runtime-зависимости (только click, pyyaml, httpx).python_devfrom __future__ import annotations, mypy --strict, Google-style docstrings, logging.qa_engineerНет реальных HTTP-вызовов в тестах. tmp_path. Fixtures из conftest.py.devopsEval job в CI без API-ключей.READMELatency ~20-80ms (no LLM in retrieval hot path). Zero-dep core.
+
+Шаг 1 — Extraction quality: evidence + quarantine + verification_source
+Поправки peer-review:
+
+A: supported=True default создаёт optimistic bias → добавить verification_source
+B: жёсткий фильтр if f.supported убивает completeness → двухпороговая политика
+
+Поправки R2 и R3 (технические):
+
+R2: ConversationTurn не содержит turn_id — использовать позиционный индекс в chunk; переименовать поле в source_spans: list[str] без зависимости от id
+R3: literal substring guardrail даёт высокий FN на нормализации — использовать token-level containment вместо snippet not in text
+
+1.1 src/ai_knot/types.py
+Новые поля в Fact:
+pythonsource_snippets: list[str] = field(default_factory=list)
+source_spans: list[str] = field(default_factory=list)   # R2: вместо source_turn_ids
+supported: bool = True
+support_confidence: float = 1.0
+verification_source: str = "manual"   # "llm" | "manual" | "legacy"
+Дефолт verification_source="manual" сохраняет совместимость с add() и историческими фактами.
+source_spans содержит фрагменты входного текста (строки), из которых извлечён факт.
+Позиционный индекс turn можно восстановить как порядковый номер в chunk — без добавления turn_id в ConversationTurn.
+1.2 src/ai_knot/extractor.py
+Расширить _EXTRACTION_SYSTEM_PROMPT — тот же вызов, дополнительные поля:
+json{
+  "content": "...",
+  "type": "semantic",
+  "importance": 0.9,
+  "source_snippet": "цитата <= 120 символов",
+  "supported": true,
+  "support_confidence": 0.92
+}
+Token-level containment guardrail (R3) вместо literal substring:
+pythondef _token_containment(snippet: str, text: str) -> float:
+    """Jaccard-like containment: |tokens(snippet) & tokens(text)| / |tokens(snippet)|."""
+    tokens_s = set(_tokenize(snippet))   # переиспользуем _tokenize из retriever.py
+    tokens_t = set(_tokenize(text))
+    if not tokens_s:
+        return 0.0
+    return len(tokens_s & tokens_t) / len(tokens_s)
+
+# В _parse_fact():
+if snippet and _token_containment(snippet, conversation_text) < 0.8:
+    fact.supported = False
+    fact.support_confidence = 0.0
+Порог 0.8 защищает от галлюцинаций, но терпим к пунктуации и частичным перефразам.
+Двухпороговый фильтр в extract():
+pythonTAU_HIGH = 0.7   # -> store main
+TAU_LOW  = 0.4   # -> store quarantine, ниже -> drop
+
+main = [f for f in facts if f.support_confidence >= TAU_HIGH]
+quarantine = [f for f in facts if TAU_LOW <= f.support_confidence < TAU_HIGH]
+extract() возвращает кортеж (main, quarantine) — retrieval использует только main.
+Установить verification_source="llm" для всех фактов из LLM-extraction.
+1.3 src/ai_knot/storage/yaml_storage.py
+Сериализация/десериализация новых полей. Backward compat: .get() с дефолтами.
+1.4 src/ai_knot/storage/sqlite_storage.py
+Миграция через PRAGMA table_info(facts) + условный ALTER TABLE ADD COLUMN:
+pythoncur.execute("PRAGMA table_info(facts)")
+existing_cols = {row[1] for row in cur.fetchall()}
+for col, definition in new_columns.items():
+    if col not in existing_cols:
+        cur.execute(f"ALTER TABLE facts ADD COLUMN {col} {definition}")
+Миграция покрывается тестом на переоткрытие БД.
+Eval метрики для шага 1
+Faithfulness считается только для verification_source="llm" фактов.
+Phase-1 gate: F >= 0.85, C >= 0.70
+Release gate: F >= 0.95, C >= 0.80
+
+Шаг 2 — Dedup: threshold tuning + char 3-gram secondary signal
+Решение по 5 скиллам: сложные heuristics (negation/antonym/numeric) НЕ делаем
+СкиллПричина отказа сложных heuristicsarchitectНе в roadmap. Module-level state — red flag в докеpython_dev"Don't add improvements beyond what was asked"READMEДокументирует Jaccard behavior явно
+Поправка R4: char 3-gram как вторичный сигнал (без новых deps)
+Тюнинг threshold полезен, но word-level Jaccard плохо ловит парафразы с разным порядком слов.
+Char 3-gram overlap решает это без лемматизации и без новых зависимостей.
+В src/ai_knot/extractor.py:
+pythondef _char_ngram_overlap(a: str, b: str, n: int = 3) -> float:
+    """Char n-gram Jaccard between two strings."""
+    ngrams_a = {a[i:i+n] for i in range(len(a)-n+1)}
+    ngrams_b = {b[i:i+n] for i in range(len(b)-n+1)}
+    if not ngrams_a or not ngrams_b:
+        return 0.0
+    return len(ngrams_a & ngrams_b) / len(ngrams_a | ngrams_b)
+
+def _is_duplicate(a: str, b: str, *, word_t: float = 0.8, ngram_t: float = 0.6) -> bool:
+    """True если один из двух сигналов превышает порог."""
+    return (
+        _jaccard_similarity(a, b) >= word_t
+        or _char_ngram_overlap(a, b) >= ngram_t
+    )
+Обновить deduplicate_facts() и resolve_against_existing() использовать _is_duplicate().
+Параметры word_t и ngram_t — параметры Extractor.__init__, тюнятся по golden датасету.
+conflict_with в Fact — не добавляем.
+Целевые метрики: Dedup FP <= 5%, Dedup recall >= 85%
+
+Шаг 3 — Retrieval quality: p95/max-fallback normalization + parametric weights
+Поправки peer-review (D, E) + R5: p95 нестабилен при малом N
+3.1 src/ai_knot/retriever.py
+Параметризованные веса:
+pythonclass TFIDFRetriever:
+    def __init__(self, tfidf_w: float = 0.6, retention_w: float = 0.2, importance_w: float = 0.2) -> None:
+Нормировка с fallback (R5):
+pythondef _normalize_scores(scores: list[float]) -> list[float]:
+    """p95-clip если N >= 20, иначе max-clip."""
+    if not scores:
+        return scores
+    if len(scores) >= 20:
+        p95_idx = int(0.95 * len(sorted(scores)))
+        p95 = sorted(scores)[p95_idx]
+        denom = p95 + 1e-9
+    else:
+        denom = max(scores) + 1e-9
+    return [min(1.0, s / denom) for s in scores]
+При N < 20 (небольшие knowledge bases) p95 нестабилен — fallback на max-clip обеспечивает корректное поведение.
+3.2 src/ai_knot/knowledge.py
+pythondef __init__(self, ..., retrieval_weights: tuple[float, float, float] = (0.6, 0.2, 0.2)) -> None:
+    self._retriever = TFIDFRetriever(*retrieval_weights)
+```
+
+### 3.3 Grid-search весов в `tests/eval/runner.py`
+Детерминированный перебор `(w1, w2, w3)` шагом 0.1, `sum=1`, objective: max nDCG@10.
+Результат — оптимальные веса для подстановки в дефолт.
+
+**Целевые метрики:** Recall@10 >= 0.85, Precision@10 >= 0.80
+
+---
+
+## Шаг 4 — Measurement layer: uncertainty-aware eval
+
+### Размеры датасетов (статистически обоснованные)
+
+При `p=0.8`, `e=0.05`, 95% CI: `n ≈ 246`. Принять минимумы:
+- `tests/golden/extraction/cases.jsonl` — 250 примеров
+- `tests/golden/retrieval/cases.jsonl` — 300 query-кейсов
+- `tests/golden/dedup/cases.jsonl` — 300 пар
+
+Temporal split: train/dev/test без утечки по пользователям.
+
+### `tests/eval/`
+```
+tests/eval/__init__.py
+tests/eval/metrics.py      # чистые функции + bootstrap CI
+tests/eval/datasets.py     # загрузка JSONL + split
+tests/eval/runner.py       # pipeline runner + grid-search + failure taxonomy
+metrics.py:
+pythondef faithfulness(predicted, labeled) -> float: ...
+def completeness(predicted, labeled) -> float: ...
+def recall_at_k(retrieved_ids, relevant_ids, k) -> float: ...
+def precision_at_k(retrieved_ids, relevant_ids, k) -> float: ...
+def bootstrap_ci(values, alpha=0.05, n_bootstrap=1000) -> tuple[float, float]: ...
+# pure Python, random.choices — без numpy
+Failure taxonomy в runner:
+
+extraction hallucination
+extraction missed (completeness loss)
+dedup false-merge
+dedup false-split
+retrieval false-positive
+retrieval false-negative
+
+Критерий принятия изменения: CI_low(delta_metric) > 0.
+Eval тесты
+tests/test_eval_extraction.py — mock LLM, faithfulness только для verification_source="llm", Phase-1 gate: F >= 0.85.
+tests/test_eval_retrieval.py — без LLM, Recall@10/Precision@10 >= 0.80.
+tests/test_eval_dedup.py — без LLM, FP <= 5%, recall >= 0.85.
+Все: @pytest.mark.eval. Mock через patch. tmp_path. Fixtures из conftest.py.
+
+Шаг 5 — CI gates: двухуровневые
+5.1 PR gate (smoke-eval)
+yamleval-smoke:
+  needs: [lint]
+  runs-on: ubuntu-latest
+  steps:
+    - pip install -e ".[dev]"
+    - pytest tests/test_eval_extraction.py tests/test_eval_retrieval.py -m "eval and not slow" -q
+20% subset датасета. Без API-ключей.
+5.2 Nightly gate (полный eval + bootstrap)
+yamleval-full:
+  schedule: "0 3 * * *"
+  steps:
+    - pytest tests/test_eval_extraction.py tests/test_eval_retrieval.py tests/test_eval_dedup.py -m eval -v
+5.3 Release gate
+yamleval-release:
+  if: startsWith(github.ref, 'refs/tags/')
+  # Release пороги: F >= 0.95, R@10 >= 0.85, P@10 >= 0.80
+5.4 Rollback trigger
+2 consecutive nightly runs ниже Phase-1 hard-gate → автоматически создать issue + заблокировать release.
+
+Порядок реализации
+
+types.py (5 новых полей: source_snippets, source_spans, supported, support_confidence, verification_source)
+extractor.py (расширенный prompt, token containment guardrail, двухпороговый фильтр, verification_source="llm", _char_ngram_overlap, _is_duplicate, параметры порогов)
+storage/yaml_storage.py + storage/sqlite_storage.py (new fields, PRAGMA migration, migration test)
+Golden tests/golden/extraction/ (250) + tests/test_eval_extraction.py
+Golden tests/golden/dedup/ (300) + tests/test_eval_dedup.py
+retriever.py (p95/max-fallback norm, parametric weights) + knowledge.py + tests/golden/retrieval/ (300) + tests/test_eval_retrieval.py
+tests/eval/ (metrics.py, datasets.py, runner.py с grid-search)
+.github/workflows/ci.yml (PR smoke + nightly + release + rollback)
+
+
+Критические файлы
+ФайлИзменениеsrc/ai_knot/types.py+5 полей в Factsrc/ai_knot/extractor.pyрасширенный prompt, token containment guardrail, двухпороговый фильтр, char 3-gram dedupsrc/ai_knot/retriever.pyпараметризованные веса, p95/max-fallback нормировкаsrc/ai_knot/knowledge.pyretrieval_weights параметрsrc/ai_knot/storage/yaml_storage.pyновые поля, backward compatsrc/ai_knot/storage/sqlite_storage.pyPRAGMA-safe миграция + migration testtests/eval/metrics.pyfaithfulness/recall/precision/bootstrap CItests/eval/datasets.pyзагрузка JSONL, temporal splittests/eval/runner.pypipeline runner, grid-search, failure taxonomytests/golden/extraction/cases.jsonl250 примеровtests/golden/retrieval/cases.jsonl300 примеровtests/golden/dedup/cases.jsonl300 парtests/test_eval_extraction.pyPhase-1 gate: F >= 0.85tests/test_eval_retrieval.pyR@10/P@10 >= 0.80tests/test_eval_dedup.pyFP <= 5%, recall >= 0.85.github/workflows/ci.ymlPR smoke + nightly + release gate
+
+Верификация
+bashruff format src/ tests/
+ruff check src/ tests/
+mypy src/ai_knot --strict
+pytest tests/ --ignore=tests/test_performance.py --ignore=tests/test_mcp_e2e.py -q
+pytest tests/test_eval_extraction.py tests/test_eval_retrieval.py tests/test_eval_dedup.py -m eval -v
+git log -1 --format="%an"   # alsoleg89
+
+======
+еще одна диагноостика
+# MIT review нового плана: что оставить, что исправить до реализации
+
+## 1) Сильная часть плана (одобряю)
+
+1. Сохранён zero-dep core и запрет LLM в retrieval hot path.
+2. Добавлен scientific loop: bootstrap CI, temporal split, pre-registered hypotheses.
+3. Двухуровневые CI-gates (smoke/nightly/release) — это правильно для DX и prod-safety.
+4. PRAGMA-based SQLite migration — правильнее, чем `ADD COLUMN IF NOT EXISTS`.
+
+---
+
+## 2) Критические риски плана V2 (исправить обязательно)
+
+## R1 — `Extractor.extract() -> (main, quarantine)` ломает текущий API
+
+Сейчас `KnowledgeBase.learn()` ожидает, что `extractor.extract()` вернёт `list[Fact]`.
+Если вернуть tuple, ломается типовой контракт и поведение `learn()`.
+
+**Правка:**
+- не менять сигнатуру `extract()`;
+- вернуть `list[Fact]` (main);
+- quarantine сохранять через отдельный метод/канал (`extract_with_diagnostics()`), не в публичном hot path.
+
+## R2 — `source_turn_ids: list[int]` не определён на уровне модели диалога
+
+`ConversationTurn` не содержит `turn_id`. Есть только `role` и `content`.
+
+**Правка:**
+- хранить индекс turn как int, но вычислять внутри extractor детерминированно;
+- или использовать `source_spans: list[str]` без жёсткой зависимости от id.
+
+## R3 — substring guardrail даёт высокий FN на нормализации текста
+
+Проверка «snippet literal substring» падает на тривиальных перефразах и пунктуации.
+Это улучшит precision, но может резко ухудшить completeness.
+
+**Правка:**
+- использовать token-level containment (Jaccard на токенах snippet vs turn);
+- порог `containment >= 0.8` вместо буквального substring.
+
+## R4 — Dedup «только параметризация порогов» может не дотянуть Recall
+
+Тюнинг threshold полезен, но без feature-level сигналов (лемматизация/символьные n-граммы)
+ограничит dedup recall на парафразах.
+
+**Правка (без новых deps):**
+- добавить вторичный score: char 3-gram overlap;
+- решение duplicate, если `jaccard_word >= t1 OR overlap_3gram >= t2`.
+
+## R5 — p95 clip нормировка требует защиту от распределений с малыми N
+
+При малом числе документов p95 нестабилен.
+
+**Правка:**
+- fallback: если `N < 20`, использовать `max`-clip;
+- если `N >= 20`, использовать p95-clip.
+
+## R6 — Eval в `tests/` отлично, но нужен machine-readable artifact
+
+Без JSON артефакта nightly/release трудно анализировать деградации во времени.
+
+**Правка:**
+- `tests/eval/runner.py` должен писать `artifacts/eval_report.json`.
+- CI сохраняет этот файл как workflow artifact.
+
+---
+
+## 3) Научно-строгая версия Acceptance Criteria
+
+## Phase-1 (engineering gate)
+- Faithfulness (llm-only) >= 0.85
+- Completeness >= 0.70
+- Dedup FP <= 10%
+- Dedup Recall >= 0.75
+- Precision@10 >= 0.75
+- Recall@10 >= 0.80
+- `CI_low(ΔA/B) > 0`
+
+## Release (prod gate)
+- Faithfulness (llm-only) >= 0.95
+- Completeness >= 0.80
+- Dedup FP <= 8%
+- Dedup Recall >= 0.80
+- Precision@10 >= 0.80
+- Recall@10 >= 0.85
+- A/B delta >= 0.10
+- Retrieval p95 в профиле SQLite-prod в пределах SLA
+
+---
+
+## 4) Что делать в коде (минимальный безопасный маршрут)
+
+1. `types.py`:
+   - добавить поля evidence + `verification_source`.
+2. `extractor.py`:
+   - расширить prompt;
+   - token-containment guardrail;
+   - confidence policy;
+   - сигнатуру `extract()` не ломать.
+3. `yaml_storage.py`, `sqlite_storage.py`:
+   - новые поля + backward compat + PRAGMA migration.
+4. `retriever.py`:
+   - param weights + clip normalization with small-N fallback.
+5. `knowledge.py`:
+   - `retrieval_weights` аргумент в `__init__`, default unchanged.
+6. `tests/eval/*` + `tests/golden/*`:
+   - uncertainty-aware метрики + JSON artifact.
+7. `ci.yml`:
+   - smoke/nightly/release jobs + artifact upload + rollback trigger.
+
+---
+
+## 5) Защита на ученом совете
+
+### Главный тезис
+План V2 жизнеспособен, если сохранить API-стабильность и добавить 6 исправлений выше.
+Без них вы получите ложные улучшения на оффлайн метриках и риски регрессий в runtime.
+
+### Ответ на ключевой вопрос совета
+**Почему это даст результат?**
+Потому что улучшения направлены на множители в `Utility ≈ F*C*R*P` в правильном порядке:
+1) сначала уменьшаем систематическую ошибку экстракции (F),
+2) потом поднимаем retrieval quality (R,P),
+3) затем фиксируем это uncertainty-aware CI gates.
+
+Это не «вера в план», а причинно проверяемая программа с критериями отката.
+======
+
 диагностика по итогам плана реализации 
 ====
 # Ревью плана реализации (позиция: MIT, memory-for-agents)
