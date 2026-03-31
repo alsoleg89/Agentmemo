@@ -123,7 +123,7 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
       - name: Run eval smoke gate
-        run: python -m pytest tests/eval/ -q --tb=short
+        run: python -m pytest tests/eval/test_gates.py -v --tb=short --no-cov
 
   eval-full:
     name: Eval full suite
@@ -136,5 +136,5 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
-      - name: Run full eval
-        run: python -c "from tests.eval.runner import run_eval; import json; r=run_eval(); print(json.dumps(r, indent=2))"
+      - name: Run full eval and print report
+        run: python -m pytest tests/eval/ -v --tb=short --no-cov
