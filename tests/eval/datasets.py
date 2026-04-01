@@ -901,4 +901,97 @@ RETRIEVAL_DATASET: list[RetrievalCase] = [
         ],
         relevant_ids=["l181", "l182", "l183"],
     ),
+    # ================================================================
+    # Variable haystack: 3-fact (tiny) — prefix t
+    # ================================================================
+    RetrievalCase(
+        query="What text editor does the user prefer?",
+        facts=[
+            {"id": "t001", "content": "User's primary editor is Neovim with LazyVim."},
+            {"id": "t002", "content": "User drinks espresso after lunch."},
+            {"id": "t003", "content": "User's desk is walnut wood."},
+        ],
+        relevant_ids=["t001"],
+    ),
+    RetrievalCase(
+        query="What is the user's morning routine?",
+        facts=[
+            {"id": "t004", "content": "User wakes at 6am and does 15 minutes of yoga."},
+            {"id": "t005", "content": "User eats oatmeal with berries for breakfast."},
+            {"id": "t006", "content": "User's favorite band is Radiohead."},
+        ],
+        relevant_ids=["t004", "t005"],
+    ),
+    RetrievalCase(
+        query="What language does the user speak at home?",
+        facts=[
+            {"id": "t007", "content": "User speaks Russian at home with family."},
+            {"id": "t008", "content": "User also speaks fluent English at work."},
+            {"id": "t009", "content": "User's shoes are size 43."},
+        ],
+        relevant_ids=["t007", "t008"],
+    ),
+    RetrievalCase(
+        query="What keyboard does the user have?",
+        facts=[
+            {"id": "t010", "content": "User types on a Keychron K2 mechanical keyboard."},
+            {"id": "t011", "content": "User's favorite holiday is New Year."},
+            {"id": "t012", "content": "User subscribes to a cheese delivery."},
+        ],
+        relevant_ids=["t010"],
+    ),
+    RetrievalCase(
+        query="Where did the user go on vacation?",
+        facts=[
+            {"id": "t013", "content": "User vacationed in Georgia last summer."},
+            {"id": "t014", "content": "User hiked in the Caucasus mountains for a week."},
+            {"id": "t015", "content": "User's dentist is near the metro station."},
+        ],
+        relevant_ids=["t013", "t014"],
+    ),
+    RetrievalCase(
+        query="What shell does the user use?",
+        facts=[
+            {"id": "t016", "content": "User uses zsh with oh-my-zsh and Powerlevel10k."},
+            {"id": "t017", "content": "User's rain jacket is Gore-Tex."},
+            {"id": "t018", "content": "User keeps a spare charger at the office."},
+        ],
+        relevant_ids=["t016"],
+    ),
+    RetrievalCase(
+        query="What is the user's favorite food?",
+        facts=[
+            {"id": "t019", "content": "User loves Georgian khachapuri and khinkali."},
+            {"id": "t020", "content": "User also enjoys Japanese ramen on cold days."},
+            {"id": "t021", "content": "User's mattress is orthopedic."},
+        ],
+        relevant_ids=["t019", "t020"],
+    ),
+    RetrievalCase(
+        query="What is the user's operating system?",
+        facts=[
+            {"id": "t022", "content": "User runs Arch Linux on the personal laptop."},
+            {"id": "t023", "content": "Work machine runs macOS Sonoma."},
+            {"id": "t024", "content": "User's wallet is RFID-blocking."},
+        ],
+        relevant_ids=["t022", "t023"],
+    ),
+    RetrievalCase(
+        query="How tall is the user?",
+        facts=[
+            {"id": "t025", "content": "User is 182cm tall."},
+            {"id": "t026", "content": "User weighs about 78 kilograms."},
+            {"id": "t027", "content": "User's guitar is acoustic."},
+        ],
+        relevant_ids=["t025"],
+    ),
+    RetrievalCase(
+        query="What car does the user drive?",
+        facts=[
+            {"id": "t028", "content": "User drives a Skoda Octavia."},
+            {"id": "t029", "content": "User parks in the underground garage."},
+            {"id": "t030", "content": "User's scarf is cashmere."},
+        ],
+        relevant_ids=["t028", "t029"],
+    ),
 ]
