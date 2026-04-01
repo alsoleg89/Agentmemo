@@ -113,16 +113,18 @@ CREATE TABLE facts (
 
 ## Forgetting curve (`ai_knot.forgetting`)
 
-Power-law decay (Wixted & Ebbesen, 1997):
+Power-law decay (Wixted & Ebbesen, 1997) with type-aware exponents (Tulving 1972):
 
 ```
-retention(t) = (1 + t / (9 × stability))^(-1)
+retention(t) = (1 + t / (9 × stability))^(-decay_exp)
 
 stability = 336h × importance × (1 + ln(1 + access_count))
+decay_exp = { semantic: 0.8, procedural: 1.0, episodic: 1.3 }
 ```
 
 - `t` = hours since `last_accessed`
 - Base stability = 336 h (2 weeks) for `importance=1.0, access_count=0`
+- Decay exponent varies by memory type: semantic facts decay slower, episodic faster
 - Power-law has heavier tail than exponential — important facts persist for months
 - Applied via `apply_decay(facts)` **before** every retrieval in `KnowledgeBase.recall()`
 - After retrieval, `access_count` is incremented and `last_accessed` is updated → reinforcement

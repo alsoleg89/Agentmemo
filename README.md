@@ -415,15 +415,19 @@ ai-knot uses a **power-law decay curve** (Wixted & Ebbesen, 1997) — empiricall
 superior to exponential decay (R²=98.9% vs 96.3%):
 
 ```
-retention(t) = (1 + t / (9 × stability))^(-1)
+retention(t) = (1 + t / (9 × stability))^(-decay_exp)
 
 stability = 336h × importance × (1 + ln(1 + access_count))
+decay_exp = { semantic: 0.8, procedural: 1.0, episodic: 1.3 }
 -> high importance + frequently accessed = remembered for months
 -> low importance + never accessed     = forgotten in weeks
+-> semantic facts decay slower, episodic facts decay faster (Tulving 1972)
 ```
 
 Power-law has a **heavier tail** than exponential — important facts persist
 realistically over months instead of vanishing after days.
+Decay exponent varies by memory type: core preferences (semantic) fade slower
+than event recollections (episodic).
 Facts accessed often get **reinforced**. Stale facts **fade automatically**.
 
 **Do you need to call `decay()` manually?** No — decay is applied automatically inside
@@ -759,6 +763,9 @@ kb.decay()  # apply power-law forgetting curve — stale facts lose retention sc
 - [x] ATC fact verification guardrail (Broder, 1997)
 - [x] Offline eval framework (P@k, R@k, MRR, nDCG, bootstrap CI)
 - [x] CI quality gates (eval-smoke, eval-full)
+- [x] Type-aware forgetting (Tulving 1972 — semantic/episodic decay exponents)
+- [x] Per-agent trust matrix for multi-agent shared memory (Marsh 1994)
+- [x] Extended Porter stemmer with morphological invariants
 - [ ] MongoDB backend
 - [ ] Qdrant + Weaviate backends
 - [ ] Semantic embeddings (sentence-transformers / OpenAI)
@@ -778,7 +785,8 @@ kb.decay()  # apply power-law forgetting curve — stale facts lose retention sc
 | Human-readable store | Yes | No | No | No |
 | Setup time | 30 sec | 10 min | 30 min | 5 min |
 | Framework-agnostic | Yes | Partial | Partial | LangGraph only |
-| Forgetting curve (power-law) | Yes | No | No | No |
+| Forgetting curve (type-aware power-law) | Yes | No | No | No |
+| Multi-agent trust matrix | Yes | No | No | No |
 | Fact verification (ATC) | Yes | No | No | No |
 | Offline eval framework | Yes | No | No | No |
 | Snapshots + diff | Yes | No | No | No |

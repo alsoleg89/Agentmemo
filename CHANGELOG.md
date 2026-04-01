@@ -51,10 +51,32 @@ Versioning: [Semantic Versioning](https://semver.org/).
   variable haystack sizes, adversarial near-miss/synonym, query-length
   variations, and high-noise topical clusters.
 
+- **Type-aware forgetting curves** (Tulving 1972, FSRS/Ye 2022) — decay exponent
+  varies by memory type: semantic=0.8 (slower decay for core facts),
+  procedural=1.0 (baseline), episodic=1.3 (steeper decay for events).
+
+- **Extended Porter stemmer** (Porter 1980) — added suffix rules for -ness,
+  -ity, -ive, -ence/-ance, -al, -ies, -es (context-aware), terminal-e stripping.
+  Ensures morphological invariants (cache/cached/caching → cach).
+
+- **Stemmed Jaccard similarity** (Broder 1997) — `extractor._jaccard_similarity()`
+  now uses `tokenize()` instead of raw `str.split()` for consistent stemming
+  across retrieval and deduplication.
+
+- **Per-agent trust matrix** (Marsh 1994) — `SharedMemoryPool` tracks per-agent
+  trust scores with `update_trust(agent_id, delta)`. Recall applies trust-weighted
+  scoring instead of flat provenance discount.
+
+- **Domain tags in eval dataset** — 765 facts tagged with 65 domain categories
+  (python, testing, devops, database, security, etc.) via keyword-based rules.
+
 ### Changed
 
 - **Retriever architecture** — `InvertedIndex` indexes content + tags fields.
   `score()` accepts `b` and `expansion_weights` parameters.
+
+- **QPS threshold** — lowered from 50 to 40 QPS in `test_retriever_throughput_qps`
+  to account for BM25F+PRF+RRF pipeline overhead on shared CI runners.
 
 ---
 
