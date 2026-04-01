@@ -183,3 +183,34 @@ tokens in the extractor but the same stem (`cach`) in the retriever.
 
 v0.6 aligns both to use `tokenize()` (Broder 1997). This ensures deduplication
 and retrieval agree on what counts as a "matching" term.
+
+---
+
+## 9. LLM auto-tagging instead of manual tag entry
+
+BM25F gives tags 2× weight (`_W_TAGS=2.0`), but `Fact.tags` was always empty
+after `learn()`. Users had to manually supply tags via `add(tags=[...])` — most
+didn't bother. The entire BM25F tags field was dead weight.
+
+v0.6 adds `"tags"` to the extraction system prompt. The LLM generates 1-3
+domain tags per fact during the same call it already makes for content, type,
+and importance. **Zero extra LLM calls.** When the LLM omits tags (older models,
+edge cases), `_parse_fact()` falls back to an empty list.
+
+This follows the **base + enhanced** pattern: `add()` accepts user-supplied tags,
+`learn()` generates them automatically.
+
+---
+
+## 10. Opt-in LLM query expansion instead of multilingual stemmer
+
+The English stemmer in `tokenizer.py` doesn't help for Russian, Chinese, or
+other languages. Instead of building a multilingual stemmer (which would add
+dependencies and complexity), v0.6 offers LLM-based query expansion.
+
+`KnowledgeBase(llm_recall=True)` expands queries with LLM-generated synonyms
+before BM25 search. This covers vocabulary gaps across any language without
+touching the tokenizer. Results are cached (LRU, 128 entries).
+
+The feature is opt-in because it adds an LLM round-trip to every `recall()`.
+Default behavior (`llm_recall=False`) is unchanged — zero latency added.
