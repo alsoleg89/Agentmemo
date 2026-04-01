@@ -19,10 +19,15 @@ _BM25_K1: float = 1.5  # Term saturation parameter.
 _BM25_B_CONTENT: float = 0.75  # Length normalization for content field.
 _BM25_B_TAGS: float = 0.3  # Length normalization for tags field.
 _W_CONTENT: float = 1.0  # Content field weight.
-_W_TAGS: float = 2.0  # Tags field weight (more specific, higher boost).
+_W_TAGS: float = 4.0  # Tags field weight — Robertson et al. (2004) BM25F:
+# curated metadata fields deserve 3-10x body weight (analogous to TREC
+# title vs body).  Tags are short, human-assigned domain labels.
 
-# IDF high-DF threshold: terms in >70% of docs get zero IDF weight.
-_IDF_HIGH_DF_RATIO: float = 0.7
+# IDF high-DF threshold: terms in >50% of docs get zero IDF weight.
+# Lowered from 0.7 (Robertson & Walker 1994): in small corpora (5-20 docs)
+# common terms like "user" appear in 40-60% of documents and must be
+# filtered to preserve discriminative power.
+_IDF_HIGH_DF_RATIO: float = 0.5
 
 # PRF parameters.
 _PRF_TOP_K: int = 3  # Number of feedback documents.
