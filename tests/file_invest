@@ -1,0 +1,1535 @@
+твоЯ роль и задача
+Действуй из роли профессора из MIT который знает python который написал докторскую по работе с памятью для агентов и которому очень понравился проект ai-knot 
+
+Посмотри на план и на анализ который уже был проведен 
+Предложи исходя из научных трудов и опыта -  что нужно улучшить 
+
+Потрать очень много времени - проведи глубинное исследование
+
+Защити потом свой проект на ученом совете состоящего из людей которые занимаются построением агентов
+
+Для построения технологически. - используй пять скиллов которые есть в проекте
+==========
+Цель
+Вот универсальные пороги для knowledge/memory системы в AI-контексте — применимые к любому агентному продукту:
+
+---
+
+### Группа 1 — Качество хранения (Extraction Quality)
+
+| Метрика | Минимум | Prod-ready | Как измерить |
+|---------|---------|------------|--------------|
+| **Faithfulness** | ≥ 0.80 | ≥ 0.95 | LLM judge: факт vs источник |
+| **Completeness** | ≥ 0.60 | ≥ 0.80 | % ключевых утверждений сохранено |
+| **Dedup precision** (FP rate) | ≤ 10% | ≤ 3% | разные факты → не сливаются |
+| **Dedup recall** | ≥ 70% | ≥ 90% | 50 парафраз → ≤5 хранится |
+
+Faithfulness — это первый hard gate. Галлюцинации при экстракции делают систему небезопасной для любого downstream агента.
+
+---
+
+### Группа 2 — Качество поиска (Retrieval Quality)
+
+| Метрика | Минимум | Prod-ready | Как измерить |
+|---------|---------|------------|--------------|
+| **Recall@10** | ≥ 0.75 | ≥ 0.90 | % релевантных фактов в top-10 |
+| **Precision@10** | ≥ 0.70 | ≥ 0.85 | % найденного что реально нужно |
+| **A/B answer delta** | > 0 | ≥ 0.10 | quality с памятью vs без памяти |
+
+A/B delta — второй hard gate. Если память не улучшает вывод агента по сравнению с "без памяти", её ценность нулевая независимо от всех остальных метрик.
+
+---
+
+### Группа 3 — Эффективность (Efficiency)
+
+| Метрика | Минимум | Prod-ready |
+|---------|---------|------------|
+| **Token reduction** | ≥ 20% | ≥ 50% |
+| **Retrieval P95** | < 200ms | < 50ms |
+| **Insert throughput** (с LLM) | ≥ 0.5 факт/с | ≥ 2 факт/с |
+
+Token reduction без деградации качества — core value prop. Если reduction 90% но completeness 1/5 — это антипаттерн.
+
+---
+
+### Трафик-светофор для go/no-go
+
+```
+🔴 Блокер (нельзя в prod):
+   Faithfulness < 0.80  ИЛИ  A/B delta = 0
+
+🟡 Риск (можно в prod с мониторингом):
+   Recall@10 < 0.90  ИЛИ  Completeness < 0.80  ИЛИ  FP rate > 5%
+
+🟢 Prod-ready:
+   Все метрики выше порога Prod-ready
+```
+
+---
+
+
+=======
+План реализации
+Context
+Диагностические документы указывают на одни и те же системные проблемы:
+
+факты сохраняются без верификации источника (Faithfulness не контролируется)
+dedup работает только по word-level Jaccard (высокие FP и FN)
+retriever имеет жёстко зашитые веса без калибровки
+нет eval-слоя и CI-гейтов по целевым метрикам
+
+Математически: Utility ≈ F * C * R * P — провал любого множителя обнуляет итог.
+Ревью применено: 5 скиллов + 2 peer-review + 4 технических замечания (R2–R5).
+
+Ограничения (из 5 скиллов — не нарушать)
+СкиллОграничениеarchitectГраф: types ← storage ← forgetting/retriever/extractor ← knowledge ← cli/integrations. KnowledgeBase — единственный публичный API.architectНулевые обязательные runtime-зависимости (только click, pyyaml, httpx).python_devfrom __future__ import annotations, mypy --strict, Google-style docstrings, logging.qa_engineerНет реальных HTTP-вызовов в тестах. tmp_path. Fixtures из conftest.py.devopsEval job в CI без API-ключей.READMELatency ~20-80ms (no LLM in retrieval hot path). Zero-dep core.
+
+Шаг 1 — Extraction quality: evidence + quarantine + verification_source
+Поправки peer-review:
+
+A: supported=True default создаёт optimistic bias → добавить verification_source
+B: жёсткий фильтр if f.supported убивает completeness → двухпороговая политика
+
+Поправки R2 и R3 (технические):
+
+R2: ConversationTurn не содержит turn_id — использовать позиционный индекс в chunk; переименовать поле в source_spans: list[str] без зависимости от id
+R3: literal substring guardrail даёт высокий FN на нормализации — использовать token-level containment вместо snippet not in text
+
+1.1 src/ai_knot/types.py
+Новые поля в Fact:
+pythonsource_snippets: list[str] = field(default_factory=list)
+source_spans: list[str] = field(default_factory=list)   # R2: вместо source_turn_ids
+supported: bool = True
+support_confidence: float = 1.0
+verification_source: str = "manual"   # "llm" | "manual" | "legacy"
+Дефолт verification_source="manual" сохраняет совместимость с add() и историческими фактами.
+source_spans содержит фрагменты входного текста (строки), из которых извлечён факт.
+Позиционный индекс turn можно восстановить как порядковый номер в chunk — без добавления turn_id в ConversationTurn.
+1.2 src/ai_knot/extractor.py
+Расширить _EXTRACTION_SYSTEM_PROMPT — тот же вызов, дополнительные поля:
+json{
+  "content": "...",
+  "type": "semantic",
+  "importance": 0.9,
+  "source_snippet": "цитата <= 120 символов",
+  "supported": true,
+  "support_confidence": 0.92
+}
+Token-level containment guardrail (R3) вместо literal substring:
+pythondef _token_containment(snippet: str, text: str) -> float:
+    """Jaccard-like containment: |tokens(snippet) & tokens(text)| / |tokens(snippet)|."""
+    tokens_s = set(_tokenize(snippet))   # переиспользуем _tokenize из retriever.py
+    tokens_t = set(_tokenize(text))
+    if not tokens_s:
+        return 0.0
+    return len(tokens_s & tokens_t) / len(tokens_s)
+
+# В _parse_fact():
+if snippet and _token_containment(snippet, conversation_text) < 0.8:
+    fact.supported = False
+    fact.support_confidence = 0.0
+Порог 0.8 защищает от галлюцинаций, но терпим к пунктуации и частичным перефразам.
+Двухпороговый фильтр в extract():
+pythonTAU_HIGH = 0.7   # -> store main
+TAU_LOW  = 0.4   # -> store quarantine, ниже -> drop
+
+main = [f for f in facts if f.support_confidence >= TAU_HIGH]
+quarantine = [f for f in facts if TAU_LOW <= f.support_confidence < TAU_HIGH]
+extract() возвращает кортеж (main, quarantine) — retrieval использует только main.
+Установить verification_source="llm" для всех фактов из LLM-extraction.
+1.3 src/ai_knot/storage/yaml_storage.py
+Сериализация/десериализация новых полей. Backward compat: .get() с дефолтами.
+1.4 src/ai_knot/storage/sqlite_storage.py
+Миграция через PRAGMA table_info(facts) + условный ALTER TABLE ADD COLUMN:
+pythoncur.execute("PRAGMA table_info(facts)")
+existing_cols = {row[1] for row in cur.fetchall()}
+for col, definition in new_columns.items():
+    if col not in existing_cols:
+        cur.execute(f"ALTER TABLE facts ADD COLUMN {col} {definition}")
+Миграция покрывается тестом на переоткрытие БД.
+Eval метрики для шага 1
+Faithfulness считается только для verification_source="llm" фактов.
+Phase-1 gate: F >= 0.85, C >= 0.70
+Release gate: F >= 0.95, C >= 0.80
+
+Шаг 2 — Dedup: threshold tuning + char 3-gram secondary signal
+Решение по 5 скиллам: сложные heuristics (negation/antonym/numeric) НЕ делаем
+СкиллПричина отказа сложных heuristicsarchitectНе в roadmap. Module-level state — red flag в докеpython_dev"Don't add improvements beyond what was asked"READMEДокументирует Jaccard behavior явно
+Поправка R4: char 3-gram как вторичный сигнал (без новых deps)
+Тюнинг threshold полезен, но word-level Jaccard плохо ловит парафразы с разным порядком слов.
+Char 3-gram overlap решает это без лемматизации и без новых зависимостей.
+В src/ai_knot/extractor.py:
+pythondef _char_ngram_overlap(a: str, b: str, n: int = 3) -> float:
+    """Char n-gram Jaccard between two strings."""
+    ngrams_a = {a[i:i+n] for i in range(len(a)-n+1)}
+    ngrams_b = {b[i:i+n] for i in range(len(b)-n+1)}
+    if not ngrams_a or not ngrams_b:
+        return 0.0
+    return len(ngrams_a & ngrams_b) / len(ngrams_a | ngrams_b)
+
+def _is_duplicate(a: str, b: str, *, word_t: float = 0.8, ngram_t: float = 0.6) -> bool:
+    """True если один из двух сигналов превышает порог."""
+    return (
+        _jaccard_similarity(a, b) >= word_t
+        or _char_ngram_overlap(a, b) >= ngram_t
+    )
+Обновить deduplicate_facts() и resolve_against_existing() использовать _is_duplicate().
+Параметры word_t и ngram_t — параметры Extractor.__init__, тюнятся по golden датасету.
+conflict_with в Fact — не добавляем.
+Целевые метрики: Dedup FP <= 5%, Dedup recall >= 85%
+
+Шаг 3 — Retrieval quality: p95/max-fallback normalization + parametric weights
+Поправки peer-review (D, E) + R5: p95 нестабилен при малом N
+3.1 src/ai_knot/retriever.py
+Параметризованные веса:
+pythonclass TFIDFRetriever:
+    def __init__(self, tfidf_w: float = 0.6, retention_w: float = 0.2, importance_w: float = 0.2) -> None:
+Нормировка с fallback (R5):
+pythondef _normalize_scores(scores: list[float]) -> list[float]:
+    """p95-clip если N >= 20, иначе max-clip."""
+    if not scores:
+        return scores
+    if len(scores) >= 20:
+        p95_idx = int(0.95 * len(sorted(scores)))
+        p95 = sorted(scores)[p95_idx]
+        denom = p95 + 1e-9
+    else:
+        denom = max(scores) + 1e-9
+    return [min(1.0, s / denom) for s in scores]
+При N < 20 (небольшие knowledge bases) p95 нестабилен — fallback на max-clip обеспечивает корректное поведение.
+3.2 src/ai_knot/knowledge.py
+pythondef __init__(self, ..., retrieval_weights: tuple[float, float, float] = (0.6, 0.2, 0.2)) -> None:
+    self._retriever = TFIDFRetriever(*retrieval_weights)
+```
+
+### 3.3 Grid-search весов в `tests/eval/runner.py`
+Детерминированный перебор `(w1, w2, w3)` шагом 0.1, `sum=1`, objective: max nDCG@10.
+Результат — оптимальные веса для подстановки в дефолт.
+
+**Целевые метрики:** Recall@10 >= 0.85, Precision@10 >= 0.80
+
+---
+
+## Шаг 4 — Measurement layer: uncertainty-aware eval
+
+### Размеры датасетов (статистически обоснованные)
+
+При `p=0.8`, `e=0.05`, 95% CI: `n ≈ 246`. Принять минимумы:
+- `tests/golden/extraction/cases.jsonl` — 250 примеров
+- `tests/golden/retrieval/cases.jsonl` — 300 query-кейсов
+- `tests/golden/dedup/cases.jsonl` — 300 пар
+
+Temporal split: train/dev/test без утечки по пользователям.
+
+### `tests/eval/`
+```
+tests/eval/__init__.py
+tests/eval/metrics.py      # чистые функции + bootstrap CI
+tests/eval/datasets.py     # загрузка JSONL + split
+tests/eval/runner.py       # pipeline runner + grid-search + failure taxonomy
+metrics.py:
+pythondef faithfulness(predicted, labeled) -> float: ...
+def completeness(predicted, labeled) -> float: ...
+def recall_at_k(retrieved_ids, relevant_ids, k) -> float: ...
+def precision_at_k(retrieved_ids, relevant_ids, k) -> float: ...
+def bootstrap_ci(values, alpha=0.05, n_bootstrap=1000) -> tuple[float, float]: ...
+# pure Python, random.choices — без numpy
+Failure taxonomy в runner:
+
+extraction hallucination
+extraction missed (completeness loss)
+dedup false-merge
+dedup false-split
+retrieval false-positive
+retrieval false-negative
+
+Критерий принятия изменения: CI_low(delta_metric) > 0.
+Eval тесты
+tests/test_eval_extraction.py — mock LLM, faithfulness только для verification_source="llm", Phase-1 gate: F >= 0.85.
+tests/test_eval_retrieval.py — без LLM, Recall@10/Precision@10 >= 0.80.
+tests/test_eval_dedup.py — без LLM, FP <= 5%, recall >= 0.85.
+Все: @pytest.mark.eval. Mock через patch. tmp_path. Fixtures из conftest.py.
+
+Шаг 5 — CI gates: двухуровневые
+5.1 PR gate (smoke-eval)
+yamleval-smoke:
+  needs: [lint]
+  runs-on: ubuntu-latest
+  steps:
+    - pip install -e ".[dev]"
+    - pytest tests/test_eval_extraction.py tests/test_eval_retrieval.py -m "eval and not slow" -q
+20% subset датасета. Без API-ключей.
+5.2 Nightly gate (полный eval + bootstrap)
+yamleval-full:
+  schedule: "0 3 * * *"
+  steps:
+    - pytest tests/test_eval_extraction.py tests/test_eval_retrieval.py tests/test_eval_dedup.py -m eval -v
+5.3 Release gate
+yamleval-release:
+  if: startsWith(github.ref, 'refs/tags/')
+  # Release пороги: F >= 0.95, R@10 >= 0.85, P@10 >= 0.80
+5.4 Rollback trigger
+2 consecutive nightly runs ниже Phase-1 hard-gate → автоматически создать issue + заблокировать release.
+
+Порядок реализации
+
+types.py (5 новых полей: source_snippets, source_spans, supported, support_confidence, verification_source)
+extractor.py (расширенный prompt, token containment guardrail, двухпороговый фильтр, verification_source="llm", _char_ngram_overlap, _is_duplicate, параметры порогов)
+storage/yaml_storage.py + storage/sqlite_storage.py (new fields, PRAGMA migration, migration test)
+Golden tests/golden/extraction/ (250) + tests/test_eval_extraction.py
+Golden tests/golden/dedup/ (300) + tests/test_eval_dedup.py
+retriever.py (p95/max-fallback norm, parametric weights) + knowledge.py + tests/golden/retrieval/ (300) + tests/test_eval_retrieval.py
+tests/eval/ (metrics.py, datasets.py, runner.py с grid-search)
+.github/workflows/ci.yml (PR smoke + nightly + release + rollback)
+
+
+Критические файлы
+ФайлИзменениеsrc/ai_knot/types.py+5 полей в Factsrc/ai_knot/extractor.pyрасширенный prompt, token containment guardrail, двухпороговый фильтр, char 3-gram dedupsrc/ai_knot/retriever.pyпараметризованные веса, p95/max-fallback нормировкаsrc/ai_knot/knowledge.pyretrieval_weights параметрsrc/ai_knot/storage/yaml_storage.pyновые поля, backward compatsrc/ai_knot/storage/sqlite_storage.pyPRAGMA-safe миграция + migration testtests/eval/metrics.pyfaithfulness/recall/precision/bootstrap CItests/eval/datasets.pyзагрузка JSONL, temporal splittests/eval/runner.pypipeline runner, grid-search, failure taxonomytests/golden/extraction/cases.jsonl250 примеровtests/golden/retrieval/cases.jsonl300 примеровtests/golden/dedup/cases.jsonl300 парtests/test_eval_extraction.pyPhase-1 gate: F >= 0.85tests/test_eval_retrieval.pyR@10/P@10 >= 0.80tests/test_eval_dedup.pyFP <= 5%, recall >= 0.85.github/workflows/ci.ymlPR smoke + nightly + release gate
+
+Верификация
+bashruff format src/ tests/
+ruff check src/ tests/
+mypy src/ai_knot --strict
+pytest tests/ --ignore=tests/test_performance.py --ignore=tests/test_mcp_e2e.py -q
+pytest tests/test_eval_extraction.py tests/test_eval_retrieval.py tests/test_eval_dedup.py -m eval -v
+git log -1 --format="%an"   # alsoleg89
+
+======
+еще одна диагноостика
+# MIT review нового плана: что оставить, что исправить до реализации
+
+## 1) Сильная часть плана (одобряю)
+
+1. Сохранён zero-dep core и запрет LLM в retrieval hot path.
+2. Добавлен scientific loop: bootstrap CI, temporal split, pre-registered hypotheses.
+3. Двухуровневые CI-gates (smoke/nightly/release) — это правильно для DX и prod-safety.
+4. PRAGMA-based SQLite migration — правильнее, чем `ADD COLUMN IF NOT EXISTS`.
+
+---
+
+## 2) Критические риски плана V2 (исправить обязательно)
+
+## R1 — `Extractor.extract() -> (main, quarantine)` ломает текущий API
+
+Сейчас `KnowledgeBase.learn()` ожидает, что `extractor.extract()` вернёт `list[Fact]`.
+Если вернуть tuple, ломается типовой контракт и поведение `learn()`.
+
+**Правка:**
+- не менять сигнатуру `extract()`;
+- вернуть `list[Fact]` (main);
+- quarantine сохранять через отдельный метод/канал (`extract_with_diagnostics()`), не в публичном hot path.
+
+## R2 — `source_turn_ids: list[int]` не определён на уровне модели диалога
+
+`ConversationTurn` не содержит `turn_id`. Есть только `role` и `content`.
+
+**Правка:**
+- хранить индекс turn как int, но вычислять внутри extractor детерминированно;
+- или использовать `source_spans: list[str]` без жёсткой зависимости от id.
+
+## R3 — substring guardrail даёт высокий FN на нормализации текста
+
+Проверка «snippet literal substring» падает на тривиальных перефразах и пунктуации.
+Это улучшит precision, но может резко ухудшить completeness.
+
+**Правка:**
+- использовать token-level containment (Jaccard на токенах snippet vs turn);
+- порог `containment >= 0.8` вместо буквального substring.
+
+## R4 — Dedup «только параметризация порогов» может не дотянуть Recall
+
+Тюнинг threshold полезен, но без feature-level сигналов (лемматизация/символьные n-граммы)
+ограничит dedup recall на парафразах.
+
+**Правка (без новых deps):**
+- добавить вторичный score: char 3-gram overlap;
+- решение duplicate, если `jaccard_word >= t1 OR overlap_3gram >= t2`.
+
+## R5 — p95 clip нормировка требует защиту от распределений с малыми N
+
+При малом числе документов p95 нестабилен.
+
+**Правка:**
+- fallback: если `N < 20`, использовать `max`-clip;
+- если `N >= 20`, использовать p95-clip.
+
+## R6 — Eval в `tests/` отлично, но нужен machine-readable artifact
+
+Без JSON артефакта nightly/release трудно анализировать деградации во времени.
+
+**Правка:**
+- `tests/eval/runner.py` должен писать `artifacts/eval_report.json`.
+- CI сохраняет этот файл как workflow artifact.
+
+---
+
+## 3) Научно-строгая версия Acceptance Criteria
+
+## Phase-1 (engineering gate)
+- Faithfulness (llm-only) >= 0.85
+- Completeness >= 0.70
+- Dedup FP <= 10%
+- Dedup Recall >= 0.75
+- Precision@10 >= 0.75
+- Recall@10 >= 0.80
+- `CI_low(ΔA/B) > 0`
+
+## Release (prod gate)
+- Faithfulness (llm-only) >= 0.95
+- Completeness >= 0.80
+- Dedup FP <= 8%
+- Dedup Recall >= 0.80
+- Precision@10 >= 0.80
+- Recall@10 >= 0.85
+- A/B delta >= 0.10
+- Retrieval p95 в профиле SQLite-prod в пределах SLA
+
+---
+
+## 4) Что делать в коде (минимальный безопасный маршрут)
+
+1. `types.py`:
+   - добавить поля evidence + `verification_source`.
+2. `extractor.py`:
+   - расширить prompt;
+   - token-containment guardrail;
+   - confidence policy;
+   - сигнатуру `extract()` не ломать.
+3. `yaml_storage.py`, `sqlite_storage.py`:
+   - новые поля + backward compat + PRAGMA migration.
+4. `retriever.py`:
+   - param weights + clip normalization with small-N fallback.
+5. `knowledge.py`:
+   - `retrieval_weights` аргумент в `__init__`, default unchanged.
+6. `tests/eval/*` + `tests/golden/*`:
+   - uncertainty-aware метрики + JSON artifact.
+7. `ci.yml`:
+   - smoke/nightly/release jobs + artifact upload + rollback trigger.
+
+---
+
+## 5) Защита на ученом совете
+
+### Главный тезис
+План V2 жизнеспособен, если сохранить API-стабильность и добавить 6 исправлений выше.
+Без них вы получите ложные улучшения на оффлайн метриках и риски регрессий в runtime.
+
+### Ответ на ключевой вопрос совета
+**Почему это даст результат?**
+Потому что улучшения направлены на множители в `Utility ≈ F*C*R*P` в правильном порядке:
+1) сначала уменьшаем систематическую ошибку экстракции (F),
+2) потом поднимаем retrieval quality (R,P),
+3) затем фиксируем это uncertainty-aware CI gates.
+
+Это не «вера в план», а причинно проверяемая программа с критериями отката.
+======
+
+диагностика по итогам плана реализации 
+====
+# Ревью плана реализации (позиция: MIT, memory-for-agents)
+
+## 1) Краткий вывод
+
+Ваш план **сильный и практичный**: он сохраняет zero-dep core, не ломает `KnowledgeBase`, и убирает LLM-зависимость из hot path retrieval.
+
+Но для научной воспроизводимости есть 6 критичных доработок.
+
+---
+
+## 2) Что в плане уже правильно
+
+1. Верификация extraction в том же LLM-вызове (без дополнительного RTT).
+2. Отказ от LLM-reranker в online retrieval (сохранение latency SLA).
+3. Eval в `tests/`, а не в `src/` (не расширяет публичный API).
+4. CI-gates без API-ключей.
+5. Приоритеты в правильном порядке: extraction -> dedup -> retrieval -> eval -> CI.
+
+---
+
+## 3) Что нужно улучшить (критично)
+
+## Улучшение A — размер датасетов (20 кейсов недостаточно)
+
+### Проблема
+20 примеров на extraction/retrieval/dedup не дают статистической мощности для gate-решений.
+
+### Почему это важно (математика)
+Для пропорции при 95% доверии и погрешности ±5% нужно порядка:
+
+`n ≈ (1.96^2 * p * (1-p)) / e^2`
+
+При `p=0.8`, `e=0.05`: `n ≈ 246`.
+
+### Что сделать
+- extraction: минимум 250 кейсов;
+- retrieval: минимум 300 query-кейсов;
+- dedup: минимум 300 пар.
+
+## Улучшение B — self-verification bias в extraction
+
+### Проблема
+Если тот же LLM и извлекает факт, и ставит `supported=true`, модель может подтверждать собственные ошибки.
+
+### Что сделать
+- добавить rule-based check: `source_snippet` обязан быть буквальной подстрокой входного диалога;
+- если подстрока не найдена -> `supported=False`.
+
+Это дешёвый и детерминированный guardrail без новых зависимостей.
+
+## Улучшение C — dedup только по negation mismatch слаб для реальных кейсов
+
+### Проблема
+Отрицание через список слов не ловит:
+- имплицитные отрицания,
+- модальности ("rarely", "hardly"),
+- русско-английские миксы,
+- числовые противоречия.
+
+### Что сделать
+Без новых deps добавить 2 эвристики:
+1. **Numeric conflict**: разные числа при высоком Jaccard (`12 engineers` vs `20 engineers`).
+2. **Antonym micro-lexicon** для частых пар (`always/never`, `likes/dislikes`, `enabled/disabled`).
+
+## Улучшение D — нормировка TF-IDF через max(query) нестабильна
+
+### Проблема
+`tfidf_norm = tfidf / max_tfidf` чувствительна к выбросам в одном документе.
+
+### Что сделать
+- clip-порог: `tfidf_norm = min(1.0, tfidf / (p95_tfidf + eps))`;
+- `p95_tfidf` считать на scored docs текущего query.
+
+Это стабилизирует ranking при длинных хвостах распределения.
+
+## Улучшение E — веса retrieval нельзя «подобрать руками»
+
+### Проблема
+Фиксация весов без процедуры калибровки даст нестабильные результаты между доменами.
+
+### Что сделать
+Добавить deterministic grid-search в `tests/eval/runner.py`:
+- перебор `(w_tfidf, w_retention, w_importance)` с шагом 0.05;
+- ограничение `sum(w)=1`;
+- objective: max nDCG@10 с penalty на падение Precision@10.
+
+## Улучшение F — CI gate должен быть двухуровневым
+
+### Проблема
+Один eval job в PR может быть шумным (flake по данным/времени).
+
+### Что сделать
+- PR gate: «smoke-eval» на маленьком стабильном поднаборе;
+- nightly gate: полный eval корпус + bootstrap CI;
+- release gate: учитывает nightly, не только PR run.
+
+---
+
+## 4) Рекомендованная научная версия плана (обновлённая)
+
+## Phase 1 (2 недели): truthfulness guardrails
+- поля evidence в `Fact`;
+- substring-support проверка;
+- extraction eval >= 250 кейсов.
+
+## Phase 2 (2 недели): dedup robustness
+- negation + numeric + antonym heuristics;
+- dedup eval >= 300 пар.
+
+## Phase 3 (2 недели): retrieval calibration
+- p95-clipped tfidf normalization;
+- grid-search весов на retrieval-gold >= 300 запросов.
+
+## Phase 4 (1 неделя): CI hardening
+- PR smoke-eval;
+- nightly full-eval + bootstrap;
+- release gate от nightly артефактов.
+
+---
+
+## 5) Защита проекта на ученом совете (готовый тезис)
+
+### Тезис
+Мы выбрали минималистичную научную стратегию: **максимум причинной верификации при нулевом росте runtime-зависимостей**.
+
+### Почему совет должен одобрить
+1. План совместим с философией ai-knot (zero-dep core, latency-aware retrieval).
+2. Улучшения фокусируются на главном узком месте: достоверность памяти.
+3. Каждое изменение имеет измеримый критерий и статистический тест.
+4. Риски ложных «улучшений» снижены за счёт двухуровневых gates.
+
+### Формальное условие принятия
+- принимаем изменение только если:
+  - `CI_low(Δmetric) > 0`,
+  - и hard-gates не нарушены (`Faithfulness >= 0.80`, `A/B delta > 0`).
+
+---
+
+## 6) Один абзац «что делать прямо сейчас»
+
+Сразу расширить extraction на evidence-поля + substring-support guardrail, затем увеличить gold-наборы до статистически валидных размеров и только после этого калибровать retrieval-веса grid-search'ем; иначе любые CI-gates будут формально красивыми, но научно слабыми.
+
+====
+# Peer-review плана реализации (научный разбор + защита на ученом совете)
+
+## 0) Позиция
+
+План в целом правильный и совместим с философией ai-knot (zero-dep core, TF-IDF default, KnowledgeBase API).
+Но в текущем виде есть 6 критичных риска, которые могут сорвать достижение целевых метрик.
+
+---
+
+## 1) Что в плане сильное (оставить)
+
+1. Evidence в extraction без дополнительного LLM round-trip.
+2. Отказ от LLM reranker в online-path (соблюдение latency SLA).
+3. Eval-модуль в `tests/`, а не в публичном `src/`.
+4. CI-gates без API-ключей и без сетевых вызовов.
+5. Пошаговый rollout (truthfulness -> dedup -> retrieval -> eval -> CI).
+
+---
+
+## 2) Что нужно улучшить (критические замечания)
+
+## Замечание A — `supported=True` по умолчанию искажает Faithfulness
+
+Если `Fact.supported=True` по дефолту, то manually-added и исторические факты искусственно улучшают метрику faithfulness.
+Это создаёт optimistic bias в отчётах.
+
+**Исправление:**
+- добавить поле `verification_source: Literal["llm", "manual", "legacy"]`;
+- в eval считать faithfulness **только по `verification_source="llm"`**;
+- `manual/legacy` не смешивать в extraction-quality denominator.
+
+## Замечание B — фильтр `if f.supported` может убить Completeness
+
+Жёсткое удаление unsupported фактов увеличит precision, но может резко снизить completeness.
+
+**Исправление:**
+- двухпороговая политика:
+  - `support_confidence >= τ_high` -> store main;
+  - `τ_low <= conf < τ_high` -> store quarantine;
+  - `< τ_low` -> drop.
+- на retrieval использовать только main store.
+- quarantine использовать для оффлайн анализа ошибок.
+
+## Замечание C — negation heuristic недостаточен для contradiction
+
+Проверка по списку отрицаний даёт высокий FN на имплицитных противоречиях и multilingual фразах.
+
+**Исправление:**
+- оставить negation heuristic как Stage-0 (дешёвый флаг);
+- добавить deterministic Stage-1:
+  - шаблоны модальности/времени/чисел (`always/never`, даты, counts),
+  - симметричная проверка entailment-lite через rule-set;
+- contradiction label хранить явно в факте (`conflict_with: list[str]`).
+
+## Замечание D — нормировка TF-IDF через max() нестабильна
+
+`tfidf_norm = tfidf / max_tfidf` чувствительна к выбросам и меняет ранги при добавлении одного документа.
+
+**Исправление:**
+- использовать percentile normalization (p95) или z-score clipping;
+- валидировать стабильность ranking через Kendall tau на контрольном наборе.
+
+## Замечание E — SQLite миграция `ADD COLUMN IF NOT EXISTS`
+
+На части окружений SQLite это ломается (версии/диалекты).
+
+**Исправление:**
+- миграцию делать через `PRAGMA table_info(facts)` и условный `ALTER TABLE ADD COLUMN`.
+- миграцию покрыть тестом на переоткрытие БД.
+
+## Замечание F — пороги нужно развести на Phase-1 и Prod
+
+Порог `Faithfulness >= 0.95` сразу после первого шага может блокировать команду и демотивировать.
+
+**Исправление:**
+- Phase-1 gate: `F >= 0.85`, `C >= 0.70`;
+- Release gate: `F >= 0.95`, `C >= 0.80`;
+- переход между фазами — только после стабильности 2 релиза.
+
+---
+
+## 3) Исправленный научный протокол (минимальный, но достаточный)
+
+1. **Pre-registered hypotheses** (до кода):
+   - H1: evidence-gating ↑Faithfulness.
+   - H2: refined dedup ↑precision/recall dedup.
+   - H3: calibrated retrieval ↑P@10/R@10.
+
+2. **Datasets split**:
+   - train/dev/test без утечки по пользователям и времени.
+   - temporal holdout обязателен.
+
+3. **Metrics with uncertainty**:
+   - bootstrap CI 95% для каждой метрики.
+   - решение о merge: `CI_low(Δ) > 0` для целевой метрики.
+
+4. **Failure taxonomy**:
+   - extraction hallucination,
+   - dedup false-merge,
+   - dedup false-split,
+   - retrieval false-positive,
+   - retrieval false-negative.
+
+5. **Rollback policy**:
+   - если 2 consecutive runs ниже hard-gate — rollback автоматически.
+
+---
+
+## 4) Что поменять в вашем плане прямо сейчас (точечно)
+
+1. В шаге 1 заменить `supported=True` default на явный `verification_source` и сегрегацию метрик.
+2. Добавить quarantine поток и двухпороговый фильтр по confidence.
+3. В шаге 2 расширить contradiction detection beyond negation words.
+4. В шаге 3 заменить `max`-нормировку TF-IDF на percentile normalization.
+5. В шаге 4 добавить uncertainty reporting (CI) как обязательный output runner.
+6. В шаге 5 добавить rollback-триггер по двум последовательным фейлам.
+
+---
+
+## 5) Защита на ученом совете
+
+### Тезис
+Мы превращаем план из «инженерного списка задач» в **валидируемую научно-инженерную программу**,
+где каждое изменение:
+- имеет гипотезу,
+- имеет метрику,
+- имеет статистическую неопределённость,
+- имеет критерий принятия/отката.
+
+### Ключевые аргументы для совета
+
+1. Мы не ломаем философию ai-knot: zero-dep core и TF-IDF default сохраняются.
+2. Мы избегаем ложного прогресса: confidence-aware gating + uncertainty-aware decisions.
+3. Мы повышаем воспроизводимость: eval в tests, без внешних API и скрытых стохастик.
+4. Мы управляем риском: phase-gates + rollback policy.
+
+### Решение совета (рекомендуемое)
+
+Одобрить план **с указанными 6 поправками**, иначе риск недостижения метрик остаётся высоким,
+особенно по completeness и dedup contradiction handling.
+
+=====
+
+# Глубокая диагностика проекта: почему метрики не достигнуты и что делать
+
+## 1) Что сейчас есть в коде (факты)
+
+1. Экстракция = один LLM prompt + JSON parse + простой dedup по Jaccard словам.
+   - `Extractor.extract()` возвращает `deduplicate_facts(facts)`.
+   - `deduplicate_facts()` сравнивает только `content` по word-level Jaccard.
+
+2. Разрешение конфликтов с уже сохранёнными фактами = тот же Jaccard.
+   - `resolve_against_existing()` при совпадении только повышает importance на +0.05.
+
+3. Ретривер = TF-IDF + линейная смесь с retention/importance.
+   - Формула уже зашита: `0.6*tfidf + 0.2*retention + 0.2*importance`.
+   - IDF считается заново на каждый поиск по всем фактам (O(N)).
+
+4. В `Fact` нет provenance/evidence полей.
+   - Есть `content/type/importance/retention/access_count/tags`.
+   - Нет `source_snippet`, `supported`, `confidence`.
+
+5. В проекте нет eval-слоя и quality-gates по целевым метрикам.
+   - Нет модулей `eval/*`.
+   - Нет тестов/пайплайна для faithfulness/completeness/recall@10/precision@10/A-B.
+
+---
+
+## 2) Математическая модель, почему сейчас не получается
+
+Обозначения:
+- `F` = Faithfulness extraction
+- `C` = Completeness extraction
+- `R` = Recall@10 retrieval
+- `P` = Precision@10 retrieval
+- `G` = A/B answer delta (качественный выигрыш от памяти)
+
+Практическая верхняя граница полезности памяти:
+
+`Utility_max ≈ F * C * R * P`
+
+Если хотя бы один множитель низкий, итог быстро падает.
+
+Пример:
+- при `F=0.80, C=0.60, R=0.75, P=0.70`
+- `Utility_max = 0.252`
+
+То есть даже идеальный генератор ответа не получит >25.2% «чистого полезного сигнала» из памяти.
+Отсюда `G` часто близок к 0.
+
+Шум памяти можно оценить как:
+
+`Noise ≈ 1 - (F * P)`
+
+При `F=0.80` и `P=0.70` шум ≈ `44%`.
+Это объясняет, почему память может не улучшать, а ухудшать ответы.
+
+---
+
+## 3) Что именно мешает каждой метрике (по коду)
+
+### 3.1 Faithfulness
+Причина:
+- В extractor нет шага верификации «утверждение подтверждено источником».
+- Любой JSON от модели после parse попадает в `Fact`.
+
+Следствие:
+- unsupported/hallucinated facts попадают в хранилище.
+
+### 3.2 Completeness
+Причина:
+- Нет claim-level segmentation.
+- Пайплайн «одним куском» на chunk и сразу в `Fact`.
+
+Следствие:
+- часть атомарных утверждений пропускается.
+
+### 3.3 Dedup precision/recall
+Причина:
+- Один признак (Jaccard words).
+- Нет разделения «парафраз» vs «противоречие».
+
+Следствие:
+- FP: разные факты сливаются.
+- FN: парафразы не сливаются.
+
+### 3.4 Recall@10 / Precision@10
+Причина:
+- Ранжирование только линейной смесью трёх сигналов.
+- Нет отдельного re-rank stage.
+- Нет dataset-based калибровки весов.
+
+Следствие:
+- top-k нестабилен на сложных запросах/синонимах.
+
+### 3.5 A/B delta
+Причина:
+- В prompt попадают факты без quality gate по support/confidence.
+
+Следствие:
+- память часто не добавляет полезный сигнал, иногда добавляет шум.
+
+### 3.6 Efficiency
+Причина:
+- TF-IDF O(N) с пересчётом DF/IDF на каждый query.
+- Нет eval-профиля p95 как релиз-гейта в CI.
+
+Следствие:
+- p95 плавает вместе с размером памяти и распределением запросов.
+
+---
+
+## 4) Что сделать (строго, по файлам)
+
+## Шаг 1 — Extraction quality (критично)
+
+1. `src/ai_knot/types.py`
+   - Добавить в `Fact`: `source_snippets`, `supported`, `support_confidence`, `source_turn_ids`.
+
+2. `src/ai_knot/extractor.py`
+   - Внедрить 4 этапа:
+     - `segment_claims()`
+     - `normalize_claims()`
+     - `verify_support(claim, turns)`
+     - `build_fact()`
+   - Не сохранять факт при `supported=False` (или сохранять в quarantine).
+
+3. `src/ai_knot/storage/yaml_storage.py`, `src/ai_knot/storage/sqlite_storage.py`
+   - Поддержать новые поля + backward compatibility.
+
+Цель шага:
+- `Faithfulness >= 0.95`
+- `Completeness >= 0.80`
+
+## Шаг 2 — Dedup correctness
+
+1. `src/ai_knot/extractor.py`
+   - Stage A: дешёвый candidate generation (текущий Jaccard).
+   - Stage B: semantic/contradiction check (LLM judge или модельная проверка).
+   - Policy:
+     - paraphrase -> merge/reinforce
+     - contradiction -> new version / flag conflict
+
+Цель шага:
+- `Dedup FP <= 3%`
+- `Dedup recall >= 90%`
+
+## Шаг 3 — Retrieval quality
+
+1. `src/ai_knot/retriever.py`
+   - Вынести веса в конфиг.
+   - Добавить нормировку скорингов.
+
+2. Новый optional модуль:
+   - `src/ai_knot/retriever_semantic.py`
+   - `src/ai_knot/reranker.py`
+
+3. `src/ai_knot/knowledge.py`
+   - Добавить профиль retrieval mode: `lexical` (default) / `hybrid`.
+
+Цель шага:
+- `Recall@10 >= 0.90`
+- `Precision@10 >= 0.85`
+
+## Шаг 4 — Measurement layer (без этого метрики недоказуемы)
+
+1. Добавить `src/ai_knot/eval/metrics.py`, `datasets.py`, `runner.py`.
+2. Добавить golden-наборы:
+   - `tests/golden/extraction/`
+   - `tests/golden/retrieval/`
+   - `tests/golden/dedup/`
+3. Добавить тесты:
+   - `tests/test_eval_extraction.py`
+   - `tests/test_eval_retrieval.py`
+   - `tests/test_eval_ab.py`
+
+Цель шага:
+- любое изменение имеет baseline/treatment и статистически проверяемый эффект.
+
+## Шаг 5 — CI gates
+
+1. `.github/workflows/ci.yml`
+   - job `eval-extraction`: fail if faithfulness < 0.80
+   - job `eval-ab`: fail if A/B delta <= 0
+   - release gate: все prod-ready пороги
+
+Цель шага:
+- регрессии блокируются до merge/release.
+
+---
+
+## 5) Научный протокол проверки (минимально необходимый)
+
+1. **Hypothesis-first**: каждое изменение связано с одной метрикой.
+2. **A/B replay**: одинаковые запросы, одинаковая модель, отличается только memory pipeline.
+3. **Bootstrap CI 95%** для метрик разницы (`Δ`).
+4. **Accept rule**:
+   - принимаем только если `CI_low(Δ) > 0` для целевой метрики,
+   - и hard-gates не нарушены.
+
+---
+
+## 6) Короткий ответ «что сейчас не так»
+
+Сейчас система хранит и ранжирует факты без доказательства их поддержанности источником и без формальной eval-системы.
+Поэтому вы не можете ни стабильно достичь метрик, ни доказать, что улучшение реально, а не случайно.
+
+## 7) Короткий ответ «что нужно сделать»
+
+Сначала закрыть extraction truthfulness (support/evidence), затем dedup correctness, затем retrieval quality, и только после этого фиксировать CI hard-gates.
+Иначе A/B delta останется около нуля независимо от оптимизаций latency/token.
+
+
+
+
+==================
+
+# Научный разбор ai-knot и защита решения на ученом совете
+
+Роль: MIT professor (agent memory systems, Python).
+Цель: объяснить **почему текущая система не добирает метрики** и какой план с максимальной вероятностью даст результат.
+
+## 1) Диагноз: что в текущей реализации ограничивает метрики
+
+## D1. Extraction truthfulness не контролируется
+
+Факт из LLM-JSON сразу превращается в `Fact` без этапа проверки поддержки источником.
+
+Последствие:
+- Faithfulness ceiling низкий;
+- downstream retrieval получает шум.
+
+Кодовые опоры:
+- parse JSON -> create Fact: `src/ai_knot/extractor.py`.
+
+## D2. Dedup/Conflict построен на одном примитивном признаке
+
+Используется word-level Jaccard и в dedup, и в merge с existing.
+
+Последствие:
+- парафразы и противоречия различаются плохо;
+- FP/FN в dedup неизбежны.
+
+Кодовые опоры:
+- `_jaccard_similarity`, `deduplicate_facts`, `resolve_against_existing`.
+
+## D3. Retrieval quality ограничена текущим ранжированием
+
+Скоринг фиксирован: `0.6*tfidf + 0.2*retention + 0.2*importance`.
+IDF пересчитывается на каждый запрос (O(N)).
+
+Последствие:
+- Recall@10/Precision@10 нестабильны при росте корпуса;
+- p95 чувствителен к размеру памяти.
+
+Кодовые опоры:
+- `src/ai_knot/retriever.py`.
+
+## D4. Нет измерительного контура для целевых метрик
+
+В CI есть lint/test/e2e, но нет eval-jobs для faithfulness/recall/A-B.
+
+Последствие:
+- невозможно доказать причинно-следственное улучшение;
+- релиз может ухудшить метрики незаметно.
+
+Кодовые опоры:
+- `.github/workflows/ci.yml`.
+
+## D5. Модель данных факта не хранит evidence
+
+`Fact` содержит operational поля, но не хранит provenance/support-confidence.
+
+Последствие:
+- невозможно auditably отвечать «почему этот факт валиден».
+
+Кодовые опоры:
+- `src/ai_knot/types.py`.
+
+---
+
+## 2) Математический аппарат (без маркетинга)
+
+Пусть:
+- `F` = Faithfulness,
+- `C` = Completeness,
+- `R` = Recall@10,
+- `P` = Precision@10,
+- `ΔAB` = answer quality gain with memory vs no-memory.
+
+### 2.1 Верхняя граница полезности памяти
+
+`U <= F * C * R * P`
+
+Если любой множитель проседает, итоговая полезность падает мультипликативно.
+
+### 2.2 Условие положительного A/B
+
+Пусть `S` — полезный сигнал из памяти, `N` — шум.
+Тогда грубо:
+
+`ΔAB ∝ (S - N)`
+
+и
+
+`S ~ F*C*R*P`, `N ~ 1 - (F*P)`
+
+Следствие: улучшения latency/token **без** роста `F,P` часто не двигают `ΔAB`.
+
+### 2.3 Где текущий код нарушает условия
+
+- Нет support-check -> `F` ограничен сверху.
+- Jaccard-only dedup -> `P` (и часть `C`) теряются.
+- Нет rerank/calibration -> `R,P` не стабилизируются.
+- Нет eval-loop -> невозможна статистическая валидация `ΔAB`.
+
+---
+
+## 3) Что улучшать: строгий план (по влиянию на метрики)
+
+## Шаг A (Blocker): evidence-based extraction
+
+### Что сделать
+1. Расширить `Fact` полями:
+   - `source_turn_ids`, `source_snippets`, `supported`, `support_confidence`.
+2. В extractor добавить pipeline:
+   - claim segmentation -> normalization -> support verification -> fact build.
+3. Поддержать новые поля в YAML/SQLite storage.
+
+### Почему это сработает
+- напрямую повышает `F`;
+- уменьшает шум на входе retrieval.
+
+### Критерий принятия
+- Faithfulness >= 0.95 на extraction gold.
+
+## Шаг B: dedup correctness
+
+### Что сделать
+- Two-stage dedup:
+  - Stage-1: candidate generation (быстрый lexical filter),
+  - Stage-2: semantic equivalence + contradiction check.
+- Явная policy:
+  - paraphrase -> reinforce,
+  - contradiction -> new version/conflict flag.
+
+### Почему это сработает
+- снижает FP и FN одновременно (в отличие от single-threshold Jaccard).
+
+### Критерий принятия
+- Dedup FP <= 3%, Dedup recall >= 90%.
+
+## Шаг C: retrieval calibration
+
+### Что сделать
+- сохранить lexical default,
+- вынести веса скоринга в конфиг,
+- добавить optional hybrid + reranker,
+- подобрать параметры на retrieval-gold.
+
+### Почему это сработает
+- coverage (recall) + cleanup (precision) достигаются разными этапами.
+
+### Критерий принятия
+- Recall@10 >= 0.90, Precision@10 >= 0.85.
+
+## Шаг D: научная валидация эффекта
+
+### Что сделать
+- создать `eval` слой + datasets + runner;
+- добавить CI jobs: `eval-extraction`, `eval-retrieval`, `eval-ab`, `eval-performance`.
+
+### Почему это сработает
+- каждая гипотеза получает baseline/treatment и статистическое решение.
+
+### Критерий принятия
+- hard gates:
+  - fail if Faithfulness < 0.80,
+  - fail if ΔAB <= 0.
+
+---
+
+## 4) Экспериментальный дизайн для ученого совета
+
+1. **Offline replay protocol**
+   - фиксируем датасет и seed;
+   - сравниваем baseline vs candidate.
+
+2. **A/B protocol**
+   - те же prompts, та же модель, меняется только memory pipeline.
+
+3. **Statistics**
+   - bootstrap CI 95% для `Δmetric`;
+   - решение «принято» только если `CI_low > 0`.
+
+4. **Bias controls**
+   - temporal split;
+   - leakage check;
+   - judge drift monitor.
+
+---
+
+## 5) Защита на ученом совете (позиция)
+
+### Главный тезис
+Мы не «добавляем фичи ради фич». Мы строим причинно-валидируемую систему памяти, где каждая инженерная инвестиция привязана к измеримой метрике и статистическому критерию принятия.
+
+### Ключевые ответы совету
+
+**Вопрос:** Почему не начинать с ускорения?
+
+**Ответ:** Ускорение без truthfulness/precision повышает скорость поставки шума. `ΔAB` от этого не растет.
+
+**Вопрос:** Почему нужен evidence в Fact?
+
+**Ответ:** Без provenance нельзя оценить Faithfulness, а значит нельзя безопасно выпускать память в prod.
+
+**Вопрос:** Почему optional advanced retrieval?
+
+**Ответ:** Чтобы сохранить сильную сторону ai-knot (легкий core) и включать сложность только там, где данные подтверждают выигрыш.
+
+**Вопрос:** Когда считаем проект готовым к prod-safe?
+
+**Ответ:** Только при одновременном выполнении целевых порогов и стабильности на двух последовательных релизах.
+
+---
+
+## 6) Финальный verdict
+
+Сейчас не работает не «идея памяти», а контур научной валидации вокруг нее.
+
+Правильная последовательность:
+1) extraction truthfulness,
+2) dedup correctness,
+3) retrieval calibration,
+4) CI hard-gates + A/B proof.
+
+Только эта последовательность имеет максимальную вероятность дать устойчивый рост метрик и пройти научную защиту.
+=======================================
+
+# Глубокая диагностика проекта: почему метрики не достигнуты и что делать
+
+## 1) Что сейчас есть в коде (факты)
+
+1. Экстракция = один LLM prompt + JSON parse + простой dedup по Jaccard словам.
+   - `Extractor.extract()` возвращает `deduplicate_facts(facts)`.
+   - `deduplicate_facts()` сравнивает только `content` по word-level Jaccard.
+
+2. Разрешение конфликтов с уже сохранёнными фактами = тот же Jaccard.
+   - `resolve_against_existing()` при совпадении только повышает importance на +0.05.
+
+3. Ретривер = TF-IDF + линейная смесь с retention/importance.
+   - Формула уже зашита: `0.6*tfidf + 0.2*retention + 0.2*importance`.
+   - IDF считается заново на каждый поиск по всем фактам (O(N)).
+
+4. В `Fact` нет provenance/evidence полей.
+   - Есть `content/type/importance/retention/access_count/tags`.
+   - Нет `source_snippet`, `supported`, `confidence`.
+
+5. В проекте нет eval-слоя и quality-gates по целевым метрикам.
+   - Нет модулей `eval/*`.
+   - Нет тестов/пайплайна для faithfulness/completeness/recall@10/precision@10/A-B.
+
+---
+
+## 2) Математическая модель, почему сейчас не получается
+
+Обозначения:
+- `F` = Faithfulness extraction
+- `C` = Completeness extraction
+- `R` = Recall@10 retrieval
+- `P` = Precision@10 retrieval
+- `G` = A/B answer delta (качественный выигрыш от памяти)
+
+Практическая верхняя граница полезности памяти:
+
+`Utility_max ≈ F * C * R * P`
+
+Если хотя бы один множитель низкий, итог быстро падает.
+
+Пример:
+- при `F=0.80, C=0.60, R=0.75, P=0.70`
+- `Utility_max = 0.252`
+
+То есть даже идеальный генератор ответа не получит >25.2% «чистого полезного сигнала» из памяти.
+Отсюда `G` часто близок к 0.
+
+Шум памяти можно оценить как:
+
+`Noise ≈ 1 - (F * P)`
+
+При `F=0.80` и `P=0.70` шум ≈ `44%`.
+Это объясняет, почему память может не улучшать, а ухудшать ответы.
+
+---
+
+## 3) Что именно мешает каждой метрике (по коду)
+
+### 3.1 Faithfulness
+Причина:
+- В extractor нет шага верификации «утверждение подтверждено источником».
+- Любой JSON от модели после parse попадает в `Fact`.
+
+Следствие:
+- unsupported/hallucinated facts попадают в хранилище.
+
+### 3.2 Completeness
+Причина:
+- Нет claim-level segmentation.
+- Пайплайн «одним куском» на chunk и сразу в `Fact`.
+
+Следствие:
+- часть атомарных утверждений пропускается.
+
+### 3.3 Dedup precision/recall
+Причина:
+- Один признак (Jaccard words).
+- Нет разделения «парафраз» vs «противоречие».
+
+Следствие:
+- FP: разные факты сливаются.
+- FN: парафразы не сливаются.
+
+### 3.4 Recall@10 / Precision@10
+Причина:
+- Ранжирование только линейной смесью трёх сигналов.
+- Нет отдельного re-rank stage.
+- Нет dataset-based калибровки весов.
+
+Следствие:
+- top-k нестабилен на сложных запросах/синонимах.
+
+### 3.5 A/B delta
+Причина:
+- В prompt попадают факты без quality gate по support/confidence.
+
+Следствие:
+- память часто не добавляет полезный сигнал, иногда добавляет шум.
+
+### 3.6 Efficiency
+Причина:
+- TF-IDF O(N) с пересчётом DF/IDF на каждый query.
+- Нет eval-профиля p95 как релиз-гейта в CI.
+
+Следствие:
+- p95 плавает вместе с размером памяти и распределением запросов.
+
+---
+
+## 4) Что сделать (строго, по файлам)
+
+## Шаг 1 — Extraction quality (критично)
+
+1. `src/ai_knot/types.py`
+   - Добавить в `Fact`: `source_snippets`, `supported`, `support_confidence`, `source_turn_ids`.
+
+2. `src/ai_knot/extractor.py`
+   - Внедрить 4 этапа:
+     - `segment_claims()`
+     - `normalize_claims()`
+     - `verify_support(claim, turns)`
+     - `build_fact()`
+   - Не сохранять факт при `supported=False` (или сохранять в quarantine).
+
+3. `src/ai_knot/storage/yaml_storage.py`, `src/ai_knot/storage/sqlite_storage.py`
+   - Поддержать новые поля + backward compatibility.
+
+Цель шага:
+- `Faithfulness >= 0.95`
+- `Completeness >= 0.80`
+
+## Шаг 2 — Dedup correctness
+
+1. `src/ai_knot/extractor.py`
+   - Stage A: дешёвый candidate generation (текущий Jaccard).
+   - Stage B: semantic/contradiction check (LLM judge или модельная проверка).
+   - Policy:
+     - paraphrase -> merge/reinforce
+     - contradiction -> new version / flag conflict
+
+Цель шага:
+- `Dedup FP <= 3%`
+- `Dedup recall >= 90%`
+
+## Шаг 3 — Retrieval quality
+
+1. `src/ai_knot/retriever.py`
+   - Вынести веса в конфиг.
+   - Добавить нормировку скорингов.
+
+2. Новый optional модуль:
+   - `src/ai_knot/retriever_semantic.py`
+   - `src/ai_knot/reranker.py`
+
+3. `src/ai_knot/knowledge.py`
+   - Добавить профиль retrieval mode: `lexical` (default) / `hybrid`.
+
+Цель шага:
+- `Recall@10 >= 0.90`
+- `Precision@10 >= 0.85`
+
+## Шаг 4 — Measurement layer (без этого метрики недоказуемы)
+
+1. Добавить `src/ai_knot/eval/metrics.py`, `datasets.py`, `runner.py`.
+2. Добавить golden-наборы:
+   - `tests/golden/extraction/`
+   - `tests/golden/retrieval/`
+   - `tests/golden/dedup/`
+3. Добавить тесты:
+   - `tests/test_eval_extraction.py`
+   - `tests/test_eval_retrieval.py`
+   - `tests/test_eval_ab.py`
+
+Цель шага:
+- любое изменение имеет baseline/treatment и статистически проверяемый эффект.
+
+## Шаг 5 — CI gates
+
+1. `.github/workflows/ci.yml`
+   - job `eval-extraction`: fail if faithfulness < 0.80
+   - job `eval-ab`: fail if A/B delta <= 0
+   - release gate: все prod-ready пороги
+
+Цель шага:
+- регрессии блокируются до merge/release.
+
+---
+
+## 5) Научный протокол проверки (минимально необходимый)
+
+1. **Hypothesis-first**: каждое изменение связано с одной метрикой.
+2. **A/B replay**: одинаковые запросы, одинаковая модель, отличается только memory pipeline.
+3. **Bootstrap CI 95%** для метрик разницы (`Δ`).
+4. **Accept rule**:
+   - принимаем только если `CI_low(Δ) > 0` для целевой метрики,
+   - и hard-gates не нарушены.
+
+---
+
+## 6) Короткий ответ «что сейчас не так»
+
+Сейчас система хранит и ранжирует факты без доказательства их поддержанности источником и без формальной eval-системы.
+Поэтому вы не можете ни стабильно достичь метрик, ни доказать, что улучшение реально, а не случайно.
+
+## 7) Короткий ответ «что нужно сделать»
+
+Сначала закрыть extraction truthfulness (support/evidence), затем dedup correctness, затем retrieval quality, и только после этого фиксировать CI hard-gates.
+Иначе A/B delta останется около нуля независимо от оптимизаций latency/token.
+=============
+
+
+# Научное заключение по ai-knot (позиция: MIT, агентная память)
+
+## 1) Короткий вердикт
+
+Проект **сильный по архитектурной базе**, но метрики качества памяти сейчас ограничены не инфраструктурой, а **отсутствием контуров доказуемой истинности и измерения**.
+
+Иными словами: система инженерно аккуратна, но научно недоопределена для заявленных KPI.
+
+---
+
+## 2) Что не работает сейчас (строго по коду)
+
+1. **Extraction truthfulness не контролируется**
+   - Экстрактор берёт JSON от LLM и сразу превращает в `Fact`.
+   - Нет стадии проверки support/evidence.
+
+2. **Dedup опирается на один слабый признак**
+   - И dedup внутри батча, и merge с existing используют word-level Jaccard.
+   - Нет отдельной обработки «противоречия».
+
+3. **Retriever не калибруется под целевую функцию**
+   - Фиксированные веса `0.6/0.2/0.2` без валидации на gold query-set.
+   - Нет re-rank слоя, который обычно поднимает Precision@k.
+
+4. **Data model не несёт научно важной наблюдаемости**
+   - В `Fact` нет provenance/confidence полей, значит нельзя корректно аудировать faithfulness.
+
+5. **Нет метрического замыкания цикла разработки**
+   - Нет eval-модуля и автоматических gate-тестов по faithfulness/recall/precision/A-B.
+
+---
+
+## 3) Математический аппарат (почему так происходит)
+
+Обозначим:
+- `F` — Faithfulness
+- `C` — Completeness
+- `R` — Recall@10
+- `P` — Precision@10
+- `G` — A/B delta качества ответа
+
+### 3.1 Мультипликативный потолок
+
+Для memory-augmented систем разумная инженерная аппроксимация:
+
+`Signal ≈ F * C * R * P`
+
+Если один фактор низкий, итоговый сигнал резко падает.
+Это объясняет типичную ситуацию «вроде всё работает, но A/B почти ноль».
+
+### 3.2 Шумовая компонента
+
+`Noise ≈ 1 - (F * P)`
+
+- низкий `F` добавляет галлюцинированные факты,
+- низкий `P` добавляет нерелевантные факты.
+
+Их произведение напрямую поднимает вероятность того, что память ухудшит ответ.
+
+### 3.3 Градиент улучшений (куда бить первым)
+
+Для `Signal = F*C*R*P`:
+
+- `∂Signal/∂F = C*R*P`
+- `∂Signal/∂P = F*C*R`
+
+То есть при текущей зрелости обычно самый быстрый рост дают шаги, которые поднимают **F** и **P**.
+Это и есть приоритет: truthfulness extraction + precision retrieval.
+
+---
+
+## 4) Что улучшить (приоритизация по ожидаемому приросту)
+
+## Приоритет A (обязательно до любых «оптимизаций»)
+
+### A1. Evidence-gated extraction
+- Где: `src/ai_knot/extractor.py`, `src/ai_knot/types.py`, storage backends.
+- Что: добавить `supported`, `support_confidence`, `source_snippets`, `source_turn_ids`.
+- Правило: факт без support не попадает в основной store.
+- Ожидаемый эффект: рост `F`, снижение noise.
+
+### A2. Двухэтапный dedup
+- Где: `src/ai_knot/extractor.py`.
+- Что:
+  - Stage-1: быстрый lexical candidate;
+  - Stage-2: semantic equivalence + contradiction check.
+- Политика: paraphrase -> reinforce; contradiction -> new version/conflict.
+- Ожидаемый эффект: рост dedup precision/recall.
+
+## Приоритет B (после A)
+
+### B1. Retrieval calibration
+- Где: `src/ai_knot/retriever.py`.
+- Что: вынести веса в параметры, калибровать на retrieval-gold.
+- Ожидаемый эффект: рост `P` и `R`.
+
+### B2. Optional reranker
+- Где: новый `src/ai_knot/reranker.py`.
+- Что: re-rank top-N кандидатов для повышения Precision@10.
+- Ожидаемый эффект: особенно полезно на длинных/синонимичных запросах.
+
+## Приоритет C (замыкание научного цикла)
+
+### C1. Eval layer
+- Где: `src/ai_knot/eval/{metrics,datasets,runner}.py`.
+- Что: единый раннер метрик + отчёты baseline/treatment.
+
+### C2. CI gates
+- Где: `.github/workflows/ci.yml`.
+- Что:
+  - fail: `Faithfulness < 0.80`
+  - fail: `A/B delta <= 0`
+  - release: полный prod-ready порог.
+
+---
+
+## 5) Экспериментальный дизайн для научсовета
+
+1. **Extraction study**
+   - Dataset: human-labeled claim→evidence.
+   - Метрики: faithfulness, completeness.
+   - Тест: bootstrap CI 95% для `ΔF`, `ΔC`.
+
+2. **Retrieval study**
+   - Dataset: query→relevant fact IDs.
+   - Метрики: Recall@10, Precision@10, nDCG@10.
+   - Тест: paired comparison baseline vs calibrated/reranked.
+
+3. **End-to-end A/B**
+   - Контроль: no-memory.
+   - Treatment: memory-enabled.
+   - Метрика: answer quality delta (LLM-judge + human sample audit).
+   - Критерий: `CI_low(ΔG) > 0`.
+
+4. **Efficiency study**
+   - Метрики: token reduction, p95 retrieval, insert throughput.
+   - Разделять cold-start и warm-cache режимы.
+
+---
+
+## 6) Защита на ученом совете (готовая позиция)
+
+### Тезис
+Мы предлагаем не «ещё одну фичу памяти», а **верифицируемую memory-science систему**:
+- формальная причинная модель,
+- измеряемые гипотезы,
+- gate-политика перед релизом.
+
+### Ожидаемые возражения и ответы
+
+**Возражение 1:** «Почему не сразу внедрить semantic retrieval везде?»
+- Ответ: без extraction truthfulness это умножит шум. Сначала поднимаем `F`, затем расширяем `R/P`.
+
+**Возражение 2:** «Почему вы уверены, что A/B улучшится?»
+- Ответ: не уверены априори; поэтому принимаем только при `CI_low(ΔG) > 0`.
+
+**Возражение 3:** «Где научная новизна?»
+- Ответ: новизна не в формуле BM25/TF-IDF, а в строго замкнутом контуре quality gates + evidence-grounded memory lifecycle для production agents.
+
+---
+
+## 7) Финальное решение совета
+
+Принять план в следующем порядке:
+1. Truthfulness extraction
+2. Dedup correctness
+3. Retrieval calibration (+ optional rerank)
+4. Eval+CI gates
+5. Production rollout через canary
+
+Это минимизирует риск ложноположительного «улучшения» и максимально быстро повышает вероятность достижения целевых метрик.
+
+
