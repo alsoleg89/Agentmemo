@@ -10,10 +10,11 @@ _TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 def _stem(token: str) -> str:
-    """Lightweight suffix stemmer (Porter 1980 step-1 subset).
+    """Lightweight suffix stemmer (Porter 1980 step-1/2 subset).
 
     Handles common English suffixes without any hardcoded word lists.
-    Rules are applied in order; first match wins.
+    Rules are applied in order; first match wins.  All inflectional
+    variants of a word must converge to the same stem (Porter invariant).
     """
     if len(token) <= 3:
         return token
@@ -25,6 +26,26 @@ def _stem(token: str) -> str:
     # -tion / -sion → remove (creation → crea, but that's ok for matching)
     if (token.endswith("tion") or token.endswith("sion")) and len(token) > 6:
         return token[:-4]
+
+    # -ness → remove (darkness → dark)
+    if token.endswith("ness") and len(token) > 6:
+        return token[:-4]
+
+    # -ity → remove (complexity → complex)
+    if token.endswith("ity") and len(token) > 6:
+        return token[:-3]
+
+    # -ive → remove (adaptive → adapt)
+    if token.endswith("ive") and len(token) > 5:
+        return token[:-3]
+
+    # -ence / -ance → remove (preference → prefer, performance → perform)
+    if (token.endswith("ence") or token.endswith("ance")) and len(token) > 6:
+        return token[:-4]
+
+    # -al → remove (functional → function)  [before -ing/-ed to avoid clash]
+    if token.endswith("al") and len(token) > 5:
+        return token[:-2]
 
     # -ing → remove (caching → cach, running → runn → run via double-consonant)
     if token.endswith("ing") and len(token) > 5:
@@ -45,16 +66,35 @@ def _stem(token: str) -> str:
     if token.endswith("ly") and len(token) > 4:
         return token[:-2]
 
-    # -er → remove (faster → fast)
+    # -er → remove (faster → fast, formatter → formatt → format)
     if token.endswith("er") and len(token) > 4:
-        return token[:-2]
+        stem = token[:-2]
+        if len(stem) >= 2 and stem[-1] == stem[-2] and stem[-1] not in "aeiou":
+            stem = stem[:-1]
+        return stem
 
     # -est → remove (fastest → fast)
     if token.endswith("est") and len(token) > 5:
         return token[:-3]
 
+    # -ies → -y (queries → query, strategies → strategy)
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"
+
+    # -es → remove 2 chars for -ches, -shes, -sses, -xes, -zes
+    # (caches → cach, matches → match, fixes → fix)
+    if token.endswith("es") and len(token) > 4:
+        before = token[-3]
+        if before in "chsxz" or token.endswith("sses"):
+            return token[:-2]
+
     # -s → remove (original rule, plural stripping)
-    if token.endswith("s"):
+    if token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+
+    # Terminal -e: strip so base forms converge with inflected stems
+    # (cache → cach like caching/cached/caches; service → servic)
+    if token.endswith("e") and len(token) > 4:
         return token[:-1]
 
     return token

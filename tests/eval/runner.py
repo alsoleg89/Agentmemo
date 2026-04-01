@@ -17,12 +17,15 @@ from tests.eval.metrics import (
 
 
 def _make_fact(d: dict[str, object]) -> Fact:
+    raw_tags = d.get("tags", [])
+    tags = list(raw_tags) if isinstance(raw_tags, (list, tuple)) else []  # type: ignore[arg-type]
     return Fact(
         id=str(d["id"]),
         content=str(d["content"]),
         type=MemoryType.SEMANTIC,
         importance=float(d.get("importance", 0.8)),  # type: ignore[arg-type]
         access_count=int(d.get("access_count", 0)),  # type: ignore[arg-type]
+        tags=tags,
         retention_score=1.0,
         last_accessed=datetime.now(UTC),
         created_at=datetime.now(UTC),

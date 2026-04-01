@@ -85,9 +85,14 @@ def _verify_facts_atc(
 
 
 def _jaccard_similarity(a: str, b: str) -> float:
-    """Compute Jaccard similarity between two strings (word-level)."""
-    words_a = set(a.lower().split())
-    words_b = set(b.lower().split())
+    """Compute Jaccard similarity between two strings using stemmed tokens.
+
+    Uses the shared stemmed tokenizer (Broder 1997) so that morphological
+    variants like "deployed"/"deploying" are recognized as identical.
+    This keeps deduplication consistent with the retriever's BM25F scoring.
+    """
+    words_a = set(tokenize(a))
+    words_b = set(tokenize(b))
     if not words_a or not words_b:
         return 0.0
     intersection = words_a & words_b

@@ -628,7 +628,12 @@ class SharedMemoryPool:
 
     Inspired by CommNet (Sukhbaatar et al., 2016): a shared communication
     channel with selective read access. Facts from other agents receive a
-    provenance discount (0.8×) to reflect lower trust in external knowledge.
+    provenance discount reflecting per-agent trust (Marsh 1994).
+
+    Trust starts at ``_PROVENANCE_DISCOUNT`` (0.8) for new agents and can
+    be adjusted via :meth:`update_trust` based on feedback quality.
+    Agents that consistently provide relevant facts earn higher trust;
+    unreliable agents can be penalized.
 
     Usage::
 
@@ -642,6 +647,9 @@ class SharedMemoryPool:
         # Coding agent queries the shared pool
         results = pool.recall("what database?", "coding_agent", top_k=5)
 
+        # Boost devops_agent trust after positive feedback
+        pool.update_trust("devops_agent", 0.05)
+
     Args:
         storage: Backend used to persist the shared namespace.
     """
@@ -650,6 +658,7 @@ class SharedMemoryPool:
         self._storage: StorageBackend = storage or YAMLStorage()
         self._retriever = TFIDFRetriever()
         self._agents: set[str] = set()
+        self._trust_scores: dict[str, float] = {}
 
     def register(self, agent_id: str) -> None:
         """Register an agent to participate in the shared pool.
@@ -663,6 +672,36 @@ class SharedMemoryPool:
     def agents(self) -> set[str]:
         """Return the set of registered agent IDs."""
         return set(self._agents)
+
+    def update_trust(self, agent_id: str, delta: float) -> float:
+        """Adjust trust score for an agent (Marsh 1994 differential trust).
+
+        Trust is clamped to [0.1, 1.0].  Positive ``delta`` rewards agents
+        whose shared facts proved relevant; negative ``delta`` penalizes
+        unreliable sources.
+
+        Args:
+            agent_id: The agent whose trust to adjust.
+            delta: Amount to add (positive = reward, negative = penalize).
+
+        Returns:
+            The updated trust score.
+        """
+        current = self._trust_scores.get(agent_id, _PROVENANCE_DISCOUNT)
+        updated = max(0.1, min(1.0, current + delta))
+        self._trust_scores[agent_id] = updated
+        return updated
+
+    def get_trust(self, agent_id: str) -> float:
+        """Return the current trust score for an agent.
+
+        Args:
+            agent_id: The agent to query.
+
+        Returns:
+            Trust score (0.1-1.0), defaulting to ``_PROVENANCE_DISCOUNT``.
+        """
+        return self._trust_scores.get(agent_id, _PROVENANCE_DISCOUNT)
 
     def publish(
         self,
@@ -741,11 +780,12 @@ class SharedMemoryPool:
 
         pairs = self._retriever.search(query, shared, top_k=top_k)
 
-        # Apply provenance discount for foreign facts.
+        # Apply per-agent trust discount for foreign facts (Marsh 1994).
         discounted: list[tuple[Fact, float]] = []
         for fact, score in pairs:
             if fact.origin_agent_id and fact.origin_agent_id != requesting_agent_id:
-                score *= _PROVENANCE_DISCOUNT
+                trust = self._trust_scores.get(fact.origin_agent_id, _PROVENANCE_DISCOUNT)
+                score *= trust
             discounted.append((fact, score))
 
         discounted.sort(key=lambda x: x[1], reverse=True)
