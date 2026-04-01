@@ -24,8 +24,16 @@ BASE_STABILITY_HOURS: float = 336.0
 
 _POWER_LAW_FACTOR: float = 9.0
 
-# FSRS-inspired configurable decay exponent (trainable in FSRS, fixed here).
-_DECAY_EXPONENT: float = 1.0
+# FSRS-inspired type-aware decay exponents (Ye, 2022-2024).
+# In FSRS these are trainable per-item; here we use fixed per-type values
+# calibrated to Tulving (1972): episodic memory decays fastest,
+# semantic knowledge persists longest.
+_TYPE_DECAY_EXPONENT: dict[str, float] = {
+    "semantic": 0.8,  # core facts: slower power-law decay
+    "procedural": 1.0,  # preferences/rules: baseline
+    "episodic": 1.3,  # events: steeper decay curve
+}
+_DEFAULT_DECAY_EXPONENT: float = 1.0
 
 # Tulving (1972): different memory types decay at different rates.
 _TYPE_STABILITY_MULTIPLIER: dict[str, float] = {
@@ -105,7 +113,8 @@ def calculate_retention(fact: Fact, *, now: datetime | None = None) -> float:
     if stability <= 0:
         return 0.0
 
-    return float((1.0 + time_hours / (_POWER_LAW_FACTOR * stability)) ** (-_DECAY_EXPONENT))
+    decay_exp = _TYPE_DECAY_EXPONENT.get(fact.type.value, _DEFAULT_DECAY_EXPONENT)
+    return float((1.0 + time_hours / (_POWER_LAW_FACTOR * stability)) ** (-decay_exp))
 
 
 def apply_decay(facts: list[Fact], *, now: datetime | None = None) -> list[Fact]:

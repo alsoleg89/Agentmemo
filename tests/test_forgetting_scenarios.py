@@ -91,7 +91,7 @@ class TestLongTermDecay:
             last_accessed=BASE_TIME,
         )
         r = calculate_retention(fact, now=BASE_TIME + timedelta(days=30))
-        assert r < 0.60  # Semantic type retains slightly longer
+        assert r < 0.65  # Semantic type retains longer (decay exponent 0.8)
 
     def test_30_days_episodic_low_importance_forgotten(self) -> None:
         """Episodic low-importance fact is well forgotten after 30 days."""
