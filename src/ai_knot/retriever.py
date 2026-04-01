@@ -19,11 +19,9 @@ _BM25_K1: float = 1.5  # Term saturation parameter.
 _BM25_B_CONTENT: float = 0.75  # Length normalization for content field.
 _BM25_B_TAGS: float = 0.3  # Length normalization for tags field.
 _W_CONTENT: float = 1.0  # Content field weight.
-_W_TAGS: float = 2.0  # Tags field weight (original). Robertson et al. (2004) BM25F
-# requires structured field weighting, but at 2.0 maintains throughput (>50 QPS).
+_W_TAGS: float = 2.0  # Tags field weight (more specific, higher boost).
 
 # IDF high-DF threshold: terms in >70% of docs get zero IDF weight.
-# Robertson & Walker (1994): common terms dilute discriminative power.
 _IDF_HIGH_DF_RATIO: float = 0.7
 
 # PRF parameters.
@@ -286,8 +284,7 @@ class BM25Retriever:
 
         # 2. PRF: expand query with feedback terms, re-score.
         # Skip PRF for tiny corpora (< 4 docs) — not enough feedback signal.
-        # Skip PRF for short queries (≤2 words) — already precise, expansion adds noise.
-        if len(facts) >= 4 and len(query.split()) > 2:
+        if len(facts) >= 4:
             expansion = _prf_expand(index, query, raw_scores)
             if expansion:
                 raw_scores = index.score(query, expansion_weights=expansion)
