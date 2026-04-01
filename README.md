@@ -435,6 +435,38 @@ every `recall()` call. For facts that are never recalled (e.g. background knowle
 agent doesn't actively query), run `kb.decay()` in a daily cron job to keep retention
 scores current.
 
+**Custom decay exponents:**
+
+```python
+kb = KnowledgeBase("agent", decay_config={
+    "semantic": 0.5,   # even slower decay for core facts
+    "episodic": 2.0,   # much faster decay for events
+})
+# Without decay_config → defaults: semantic=0.8, procedural=1.0, episodic=1.3
+```
+
+---
+
+## LLM-enhanced features (base + enhanced)
+
+When an LLM provider is configured, additional capabilities activate:
+
+```python
+# Auto-tagging: LLM generates domain tags during learn() — zero extra calls
+kb = KnowledgeBase("agent", provider="openai", api_key="sk-...")
+kb.learn(turns)
+# → Fact(content="User prefers Python", tags=["python", "preferences"])
+
+# Query expansion: LLM adds synonyms before BM25 search (opt-in)
+kb = KnowledgeBase("agent", provider="openai", api_key="sk-...",
+                   llm_recall=True)
+kb.recall("what database?")
+# → internally expands to "database PostgreSQL SQL storage" → better recall
+```
+
+Without an LLM, everything works as before — tags via `add(tags=[...])`,
+raw queries via BM25.
+
 ---
 
 ## CLI
@@ -766,6 +798,9 @@ kb.decay()  # apply power-law forgetting curve — stale facts lose retention sc
 - [x] Type-aware forgetting (Tulving 1972 — semantic/episodic decay exponents)
 - [x] Per-agent trust matrix for multi-agent shared memory (Marsh 1994)
 - [x] Extended Porter stemmer with morphological invariants
+- [x] LLM auto-tagging during extraction (base + enhanced pattern)
+- [x] Configurable decay exponents via `decay_config`
+- [x] Opt-in LLM query expansion at recall time
 - [ ] MongoDB backend
 - [ ] Qdrant + Weaviate backends
 - [ ] Semantic embeddings (sentence-transformers / OpenAI)

@@ -70,6 +70,19 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - **Domain tags in eval dataset** — 765 facts tagged with 65 domain categories
   (python, testing, devops, database, security, etc.) via keyword-based rules.
 
+- **LLM auto-tagging during extraction** — `learn()` now instructs the LLM to
+  generate 1-3 domain tags per fact. Tags are parsed from the JSON response and
+  stored in `Fact.tags`, activating BM25F tag field weighting automatically.
+  Falls back to empty tags when the LLM omits them. Zero extra LLM calls.
+
+- **Configurable decay exponents** — `KnowledgeBase(decay_config={...})` allows
+  per-type decay overrides without editing source. `apply_decay()` and
+  `calculate_retention()` accept optional `type_exponents` parameter.
+
+- **LLM query expansion at recall** (opt-in) — `KnowledgeBase(llm_recall=True)`
+  expands queries with LLM-generated synonyms before BM25 search. Uses the
+  configured provider with LRU cache (128 entries). Disabled by default.
+
 ### Changed
 
 - **Retriever architecture** — `InvertedIndex` indexes content + tags fields.
