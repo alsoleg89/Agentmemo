@@ -505,7 +505,7 @@ class TestLLMVsBaseDifferences:
     """
 
     def test_expansion_changes_top_result(self, tmp_path: pathlib.Path) -> None:
-        """Query expansion promotes a fact from non-top to top-1 position."""
+        """Query expansion promotes a fact to #1 when it has no base overlap."""
         storage = YAMLStorage(base_dir=str(tmp_path))
 
         # Target fact has NO overlap with raw query "relational storage"
@@ -540,26 +540,23 @@ class TestLLMVsBaseDifferences:
 
         query = "relational storage"
 
-        # Base: PostgreSQL fact has zero BM25 match with "relational storage"
-        base_results = kb_base.recall_facts(query, top_k=1)
+        # Base: PostgreSQL fact has zero BM25 match → ranked last
+        base_results = kb_base.recall_facts_with_scores(query, top_k=5)
+        base_rank = next(i for i, (f, _) in enumerate(base_results) if "PostgreSQL" in f.content)
+        assert base_rank == len(distractors), "Base should rank PostgreSQL last"
 
-        # LLM: expansion adds "PostgreSQL SQL database" → target becomes relevant
+        # LLM: expansion adds domain-relevant terms → target promoted to #1
         with patch(
             "ai_knot.query_expander.call_with_retry",
-            return_value="relational storage PostgreSQL SQL database",
+            return_value="relational storage PostgreSQL data persistence",
         ):
-            llm_results = kb_llm.recall_facts(query, top_k=1)
+            llm_results = kb_llm.recall_facts_with_scores(query, top_k=5)
+        llm_rank = next(i for i, (f, _) in enumerate(llm_results) if "PostgreSQL" in f.content)
 
-        base_top = base_results[0].content if base_results else ""
-        llm_top = llm_results[0].content if llm_results else ""
-
-        assert "PostgreSQL" not in base_top, (
-            "Base should not rank PostgreSQL fact first for 'relational storage'"
-        )
-        assert "PostgreSQL" in llm_top, "LLM expansion should promote PostgreSQL fact to top-1"
+        assert llm_rank == 0, f"Expansion should promote PostgreSQL to #1 (got rank {llm_rank})"
 
     def test_expansion_adds_fact_to_top_results(self, tmp_path: pathlib.Path) -> None:
-        """Query expansion surfaces a fact that base BM25 ranks below top-2."""
+        """Query expansion surfaces a fact into top-2 that base ranks last."""
         storage = YAMLStorage(base_dir=str(tmp_path))
 
         # Target: no overlap with raw query "cloud tools"
@@ -591,12 +588,13 @@ class TestLLMVsBaseDifferences:
 
         query = "cloud tools"
 
-        # Base: distractors match "cloud"/"tools" → Docker fact is NOT in top 2
+        # Base: Docker fact ranked last (no token overlap)
         kb_base = KnowledgeBase(agent_id="base", storage=storage)
-        base_top2 = kb_base.recall_facts(query, top_k=2)
-        base_has_docker = any("Docker" in f.content for f in base_top2)
+        base_all = kb_base.recall_facts_with_scores(query, top_k=5)
+        base_rank = next(i for i, (f, _) in enumerate(base_all) if "Docker" in f.content)
+        assert base_rank == len(distractors), "Base should rank Docker last"
 
-        # LLM: expansion adds Docker-related terms → Docker fact IS in top 2
+        # LLM: expansion adds Docker-related terms → Docker in top-2
         provider = MagicMock()
         provider.name = "mock"
         provider.default_model = "gpt-4o"
@@ -608,13 +606,12 @@ class TestLLMVsBaseDifferences:
         )
         with patch(
             "ai_knot.query_expander.call_with_retry",
-            return_value="cloud tools Docker container Kubernetes orchestration",
+            return_value="cloud tools Docker container orchestration",
         ):
-            llm_top2 = kb_llm.recall_facts(query, top_k=2)
-        llm_has_docker = any("Docker" in f.content for f in llm_top2)
+            llm_all = kb_llm.recall_facts_with_scores(query, top_k=5)
+        llm_rank = next(i for i, (f, _) in enumerate(llm_all) if "Docker" in f.content)
 
-        assert not base_has_docker, "Base should not rank Docker in top-2 for 'cloud tools'"
-        assert llm_has_docker, "LLM expansion should bring Docker into top-2"
+        assert llm_rank <= 1, f"Expansion should promote Docker to top-2 (got rank {llm_rank})"
 
     def test_auto_tags_change_ranking(self, tmp_path: pathlib.Path) -> None:
         """Tags from auto-tagging boost a fact above untagged competitors.
@@ -770,20 +767,20 @@ class TestLLMVsBaseDifferences:
 
         query = "relational storage"
 
-        # Base: no expansion, no tags, default decay
-        base_results = kb_base.recall_facts(query, top_k=1)
+        # Base: no expansion, no tags, default decay → PostgreSQL ranked last
+        base_results = kb_base.recall_facts_with_scores(query, top_k=5)
+        base_rank = next(i for i, (f, _) in enumerate(base_results) if "PostgreSQL" in f.content)
 
-        # Full LLM: expanded query + tag boost + slow decay
+        # Full LLM: expanded query + tag boost + slow decay → PostgreSQL #1
         with patch(
             "ai_knot.query_expander.call_with_retry",
-            return_value="relational storage PostgreSQL SQL database",
+            return_value="relational storage PostgreSQL data persistence",
         ):
-            full_results = kb_full.recall_facts(query, top_k=1)
+            full_results = kb_full.recall_facts_with_scores(query, top_k=5)
+        full_rank = next(i for i, (f, _) in enumerate(full_results) if "PostgreSQL" in f.content)
 
-        base_top = base_results[0].content if base_results else ""
-        full_top = full_results[0].content if full_results else ""
-
-        # Base cannot rank PostgreSQL first (no token overlap)
-        # Full LLM pipeline promotes it via expansion + tags + retention
-        assert "PostgreSQL" not in base_top
-        assert "PostgreSQL" in full_top
+        # Full LLM pipeline promotes PostgreSQL to #1 via expansion + tags + retention
+        assert base_rank == len(distractors), "Base should rank PostgreSQL last"
+        assert full_rank == 0, (
+            f"Full LLM pipeline should promote PostgreSQL to #1 (got rank {full_rank})"
+        )
