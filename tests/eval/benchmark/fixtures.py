@@ -641,13 +641,15 @@ CONSOLIDATION_QUERIES: list[str] = [
 
 # Keywords from the v5 (latest) fact for each query — used for latest_recall.
 # All lowercase for case-insensitive matching.
-CONSOLIDATION_LATEST_KEYWORDS: dict[str, list[str]] = {
-    CONSOLIDATION_QUERIES[0]: ["copilot"],
-    CONSOLIDATION_QUERIES[1]: ["10-person", "10 person", "ten"],
-    CONSOLIDATION_QUERIES[2]: ["continuous", "every merged", "automatic"],
-    CONSOLIDATION_QUERIES[3]: ["timescaledb", "time-series"],
-    CONSOLIDATION_QUERIES[4]: ["security scan"],
-}
+# The v5 (latest) fact for each topic — ground truth for semantic_latest_recall.
+# These are CONSOLIDATION_FACTS[20:25] (last round), listed in query order.
+CONSOLIDATION_LATEST_FACTS: list[str] = [
+    "User's primary editor is Cursor with GitHub Copilot integration enabled.",
+    "User manages a 10-person engineering team across two time zones.",
+    "Every merged PR triggers automatic deployment via continuous delivery pipeline.",
+    "User's stack uses PostgreSQL 16 with the TimescaleDB extension for time-series data.",
+    "PR policy: two approvals, passing CI, and an automated security scan are required.",
+]
 
 N_CONSOLIDATION_TOPICS = 5
 N_CONSOLIDATION_VERSIONS = 5  # versions per topic
@@ -658,7 +660,7 @@ N_CONSOLIDATION_FACTS = N_CONSOLIDATION_TOPICS * N_CONSOLIDATION_VERSIONS  # 25
 class ConsolidationFixture:
     facts: list[str]
     queries: list[str]
-    latest_keywords: dict[str, list[str]]
+    latest_facts: list[str]  # v5 ground-truth fact per query, for semantic recall
     n_topics: int
     n_versions: int
 
@@ -666,7 +668,7 @@ class ConsolidationFixture:
 CONSOLIDATION = ConsolidationFixture(
     facts=CONSOLIDATION_FACTS,
     queries=CONSOLIDATION_QUERIES,
-    latest_keywords=CONSOLIDATION_LATEST_KEYWORDS,
+    latest_facts=CONSOLIDATION_LATEST_FACTS,
     n_topics=N_CONSOLIDATION_TOPICS,
     n_versions=N_CONSOLIDATION_VERSIONS,
 )
