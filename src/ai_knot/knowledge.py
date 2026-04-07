@@ -10,7 +10,12 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ai_knot.extractor import Extractor, resolve_against_existing, resolve_structured
+from ai_knot.extractor import (
+    Extractor,
+    resolve_against_existing,
+    resolve_by_slot,
+    resolve_structured,
+)
 from ai_knot.forgetting import apply_decay
 from ai_knot.providers import LLMProvider, create_provider
 from ai_knot.query_expander import LLMQueryExpander
@@ -244,9 +249,20 @@ class KnowledgeBase:
     ) -> list[Fact]:
         """Extract and store facts from a conversation using an LLM.
 
-        Existing facts that are similar to newly extracted ones (Jaccard >=
-        ``conflict_threshold``) are updated in place (importance bumped, access
-        time refreshed) instead of being duplicated.
+        Resolution uses a three-phase pipeline:
+
+        1. **Slot-based** (deterministic): facts with ``slot_key`` are matched
+           against existing active facts by exact ``slot_key`` equality.
+           Same slot + same value → *reinforce* (bump confidence, no insert).
+           Same slot + new value → *supersede* (temporal close + versioned insert).
+           No slot match → *branch* (insert as new).
+
+        2. **Entity-addressed CAS** (fuzzy, backward compat): unslotted facts
+           with ``entity`` + ``attribute`` are matched via ``resolve_structured``
+           (Jaccard entity matching) to close superseded pre-Phase-1 facts.
+
+        3. **Lexical dedup**: remaining unslotted facts are checked against active
+           facts with ``resolve_against_existing`` (combined Jaccard + containment).
 
         Provider credentials default to those passed at :meth:`__init__` when
         not specified per-call.
@@ -261,8 +277,8 @@ class KnowledgeBase:
                 openai-compat.
             model: Override the default model for this provider. Falls back to
                 the value set at init.
-            conflict_threshold: Jaccard similarity threshold above which a new
-                fact is treated as a duplicate of an existing one (0.0–1.0).
+            conflict_threshold: Jaccard similarity threshold for the lexical
+                dedup pass (phase 3). Does not affect slot-based resolution.
             timeout: Per-request timeout in seconds for LLM calls. ``None``
                 uses the provider's built-in default (30 s).
             batch_size: Maximum conversation turns sent per LLM call. Longer
@@ -273,7 +289,8 @@ class KnowledgeBase:
                 precedence.
 
         Returns:
-            List of genuinely new Facts that were inserted (excludes updates).
+            List of inserted Facts (new inserts + versioned replacements).
+            Reinforced facts (same value) are excluded from the return value.
         """
         if not turns:
             return []
@@ -323,25 +340,67 @@ class KnowledgeBase:
 
         if new_facts:
             existing = self._storage.load(self._agent_id)
-
-            # Phase 1: entity-addressed close (temporal versioning for same entity+attribute)
             now_close = datetime.now(UTC)
-            for new_fact in new_facts:
-                matched_fact = resolve_structured(new_fact, existing)
+            active_existing = [f for f in existing if f.is_active(now_close)]
+
+            to_insert: list[Fact] = []
+            # IDs of active facts already handled — excluded from later phases.
+            handled_ids: set[str] = set()
+            n_reinforce = n_supersede = n_branch = 0
+
+            # Phase 1: slot-based resolution (deterministic, exact slot_key match).
+            slotted_facts = [f for f in new_facts if f.slot_key]
+            for new_fact in slotted_facts:
+                op, matched = resolve_by_slot(new_fact, active_existing)
+                if op == "reinforce":
+                    assert matched is not None
+                    matched.state_confidence = min(1.0, matched.state_confidence + 0.05)
+                    matched.importance = min(1.0, matched.importance + 0.02)
+                    matched.last_accessed = now_close
+                    handled_ids.add(matched.id)
+                    n_reinforce += 1
+                elif op == "supersede":
+                    assert matched is not None
+                    matched.valid_until = now_close
+                    handled_ids.add(matched.id)
+                    new_fact.importance = min(1.0, matched.importance + 0.05)
+                    new_fact.version = matched.version + 1
+                    to_insert.append(new_fact)
+                    n_supersede += 1
+                else:  # branch — new slot, insert as-is
+                    to_insert.append(new_fact)
+                    n_branch += 1
+
+            # Phase 2: entity-addressed CAS for unslotted facts with entity+attribute.
+            # Closes pre-Phase-1 storage facts that carry entity/attribute but no slot_key.
+            unslotted_facts = [f for f in new_facts if not f.slot_key]
+            unslotted_with_entity = [f for f in unslotted_facts if f.entity and f.attribute]
+            entity_candidates = [f for f in active_existing if f.id not in handled_ids]
+            for new_fact in unslotted_with_entity:
+                # Re-filter candidates each iteration so each existing fact is matched at most once.
+                available = [f for f in entity_candidates if f.id not in handled_ids]
+                matched_fact = resolve_structured(new_fact, available)
                 if matched_fact is not None:
                     matched_fact.valid_until = now_close
+                    handled_ids.add(matched_fact.id)
 
-            # Phase 2: lexical dedup against active facts only
-            active_existing = [f for f in existing if f.is_active(now_close)]
-            to_insert, _ = resolve_against_existing(
-                new_facts, active_existing, threshold=conflict_threshold
+            # Phase 3: lexical dedup for remaining unslotted facts.
+            remaining_active = [f for f in entity_candidates if f.id not in handled_ids]
+            unslotted_inserted, _ = resolve_against_existing(
+                unslotted_facts, remaining_active, threshold=conflict_threshold
             )
+            to_insert.extend(unslotted_inserted)
+
             self._storage.save(self._agent_id, existing + to_insert)
             logger.info(
-                "Learned %d new facts (%d merged) for agent '%s'",
+                "Learned %d facts for agent '%s' "
+                "(slot: %d reinforced, %d superseded, %d new; lexical: %d merged)",
                 len(to_insert),
-                len(new_facts) - len(to_insert),
                 self._agent_id,
+                n_reinforce,
+                n_supersede,
+                n_branch,
+                len(unslotted_facts) - len(unslotted_inserted),
             )
             return to_insert
         return []

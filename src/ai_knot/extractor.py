@@ -276,6 +276,43 @@ def resolve_structured(
     return None
 
 
+def resolve_by_slot(
+    new_fact: Fact,
+    existing: list[Fact],
+) -> tuple[str, Fact | None]:
+    """Exact-match slot resolution against existing active facts.
+
+    Returns ``(op, matched)`` where *op* is one of:
+
+    - ``'branch'``: ``new_fact`` has no ``slot_key``, or no existing fact shares it → insert as new.
+    - ``'reinforce'``: same slot, same ``value_text`` → bump confidence on existing, skip insert.
+    - ``'supersede'``: same slot, different (or missing) ``value_text`` → close old, insert new.
+
+    This is faster and more reliable than Jaccard-based ``resolve_structured`` because
+    ``slot_key`` is a deterministic ``"{entity}::{attribute}"`` address — no fuzzy matching needed.
+
+    Args:
+        new_fact: Newly extracted fact to resolve.
+        existing: Active facts to search. Caller is responsible for passing only active facts.
+    """
+    if not new_fact.slot_key:
+        return "branch", None
+
+    for old in existing:
+        if old.slot_key != new_fact.slot_key:
+            continue
+        # Same slot — compare values to decide reinforce vs supersede.
+        if (
+            new_fact.value_text
+            and old.value_text
+            and new_fact.value_text.strip().lower() == old.value_text.strip().lower()
+        ):
+            return "reinforce", old
+        return "supersede", old
+
+    return "branch", None
+
+
 class Extractor:
     """Extract structured facts from conversations using an LLM.
 
