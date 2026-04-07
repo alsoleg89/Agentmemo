@@ -67,19 +67,21 @@ class AiKnotMultiAgentBackend(MultiAgentMemoryBackend):
             insert_ms=(time.perf_counter() - t0) * 1000,
         )
 
+    def _patch_fact_by_id(self, kb: KnowledgeBase, fact_id: str, **attrs: object) -> None:
+        facts = kb.list_facts()
+        for f in facts:
+            if f.id == fact_id:
+                for k, v in attrs.items():
+                    setattr(f, k, v)
+                break
+        kb.replace_facts(facts)
+
     async def add_structured(
         self, agent_id: str, content: str, *, entity: str, attribute: str
     ) -> None:
         kb = self._kb(agent_id)
         fact = kb.add(content)
-        # Patch entity+attribute on the saved fact.
-        facts = kb.list_facts()
-        for f in facts:
-            if f.id == fact.id:
-                f.entity = entity
-                f.attribute = attribute
-                break
-        kb.replace_facts(facts)
+        self._patch_fact_by_id(kb, fact.id, entity=entity, attribute=attribute)
 
     async def retrieve_for_agent(
         self, agent_id: str, query: str, *, top_k: int = 5
@@ -93,13 +95,15 @@ class AiKnotMultiAgentBackend(MultiAgentMemoryBackend):
             retrieve_ms=(time.perf_counter() - t0) * 1000,
         )
 
-    async def publish_to_pool(self, agent_id: str) -> int:
+    async def publish_to_pool(self, agent_id: str, *, utility_threshold: float = 0.0) -> int:
         assert self._pool is not None, "call reset() first"
         kb = self._kb(agent_id)
         fact_ids = [f.id for f in kb.list_facts() if f.is_active()]
         if not fact_ids:
             return 0
-        published = self._pool.publish(agent_id, fact_ids, kb=kb)
+        published = self._pool.publish(
+            agent_id, fact_ids, kb=kb, utility_threshold=utility_threshold
+        )
         return len(published)
 
     async def pool_retrieve(
@@ -130,6 +134,38 @@ class AiKnotMultiAgentBackend(MultiAgentMemoryBackend):
         assert self._pool is not None, "call reset() first"
         deltas: list[SlotDelta] = self._pool.sync_slot_deltas(agent_id)
         return [d.prompt_surface or d.content for d in deltas]
+
+    async def insert_for_agent_with_meta(
+        self,
+        agent_id: str,
+        text: str,
+        *,
+        topic_channel: str = "",
+        importance: float = 0.5,
+    ) -> InsertResult:
+        t0 = time.perf_counter()
+        kb = self._kb(agent_id)
+        fact = kb.add(text)
+        if topic_channel or importance != 0.5:
+            self._patch_fact_by_id(kb, fact.id, topic_channel=topic_channel, importance=importance)
+        stored = sum(1 for f in kb.list_facts() if f.is_active())
+        return InsertResult(
+            facts_stored=stored,
+            facts_extracted=1,
+            insert_ms=(time.perf_counter() - t0) * 1000,
+        )
+
+    async def pool_retrieve_for_channel(
+        self, agent_id: str, query: str, *, top_k: int = 5, topic_channel: str = ""
+    ) -> RetrievalResult:
+        assert self._pool is not None, "call reset() first"
+        t0 = time.perf_counter()
+        pairs = self._pool.recall(query, agent_id, top_k=top_k, topic_channel=topic_channel)
+        return RetrievalResult(
+            texts=[f.source_verbatim or f.content for f, _ in pairs],
+            scores=[s for _, s in pairs],
+            retrieve_ms=(time.perf_counter() - t0) * 1000,
+        )
 
     def __del__(self) -> None:
         if self._tmp_dir:

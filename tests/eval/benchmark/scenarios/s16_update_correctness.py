@@ -22,7 +22,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from ai_knot.types import ConversationTurn, Fact, MemoryOp, MemoryType
-from tests.eval.benchmark.base import ScenarioResult, SingleAgentMemoryBackend
+from tests.eval.benchmark.base import MemoryBackend, ScenarioResult
 from tests.eval.benchmark.judge import BaseJudge
 
 SCENARIO_ID = "s16_update_correctness"
@@ -41,7 +41,7 @@ def _slotted(content: str, *, slot_key: str, value_text: str, op: MemoryOp) -> F
     )
 
 
-async def run(backend: SingleAgentMemoryBackend, judge: BaseJudge) -> ScenarioResult:
+async def run(backend: MemoryBackend, judge: BaseJudge) -> ScenarioResult:
     await backend.reset()
 
     kb = getattr(backend, "_kb", None)
