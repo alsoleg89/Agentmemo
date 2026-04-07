@@ -70,6 +70,19 @@ CREATE TABLE IF NOT EXISTS snapshots (
 )
 """
 
+_INSERT_FACTS_SQL = """INSERT INTO facts
+   (id, agent_id, content, type, importance, retention,
+    access_count, tags, created_at, last_accessed,
+    source_snippets, source_spans, supported,
+    support_confidence, verification_source,
+    access_intervals, origin_agent_id, visibility,
+    source_verbatim, valid_from, valid_until,
+    entity, attribute, version, mesi_state,
+    canonical_surface, witness_surface, prompt_surface,
+    slot_key, value_text, qualifiers, state_confidence,
+    topic_channel, visibility_scope)
+   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+
 
 class SQLiteStorage:
     """Stores facts in a local SQLite database.
@@ -134,7 +147,29 @@ class SQLiteStorage:
 
     def save(self, agent_id: str, facts: list[Fact]) -> None:
         """Replace all facts for an agent."""
-        rows = [
+        rows = self._build_rows(agent_id, facts)
+        self._execute_save(agent_id, rows)
+        logger.debug("Saved %d facts for agent '%s'", len(facts), agent_id)
+
+    def save_atomic(self, agent_id: str, facts: list[Fact]) -> None:
+        """Atomically replace facts using BEGIN IMMEDIATE to block concurrent writers."""
+        rows = self._build_rows(agent_id, facts)
+        conn = sqlite3.connect(self._db_path, timeout=30.0, isolation_level=None)
+        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM facts WHERE agent_id = ?", (agent_id,))
+            conn.executemany(_INSERT_FACTS_SQL, rows)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+        logger.debug("Atomically saved %d facts for agent '%s'", len(facts), agent_id)
+
+    def _build_rows(self, agent_id: str, facts: list[Fact]) -> list[tuple]:  # type: ignore[type-arg]
+        return [
             (
                 fact.id,
                 agent_id,
@@ -173,24 +208,11 @@ class SQLiteStorage:
             )
             for fact in facts
         ]
+
+    def _execute_save(self, agent_id: str, rows: list[tuple]) -> None:  # type: ignore[type-arg]
         with self._get_conn() as conn:
             conn.execute("DELETE FROM facts WHERE agent_id = ?", (agent_id,))
-            conn.executemany(
-                """INSERT INTO facts
-                   (id, agent_id, content, type, importance, retention,
-                    access_count, tags, created_at, last_accessed,
-                    source_snippets, source_spans, supported,
-                    support_confidence, verification_source,
-                    access_intervals, origin_agent_id, visibility,
-                    source_verbatim, valid_from, valid_until,
-                    entity, attribute, version, mesi_state,
-                    canonical_surface, witness_surface, prompt_surface,
-                    slot_key, value_text, qualifiers, state_confidence,
-                    topic_channel, visibility_scope)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                rows,
-            )
-        logger.debug("Saved %d facts for agent '%s'", len(facts), agent_id)
+            conn.executemany(_INSERT_FACTS_SQL, rows)
 
     def load(self, agent_id: str) -> list[Fact]:
         """Load all facts for an agent."""

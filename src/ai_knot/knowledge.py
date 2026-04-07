@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import threading
 from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -32,6 +33,9 @@ _SHARED_NAMESPACE = "__shared__"
 _PROVENANCE_DISCOUNT = 0.8
 # Facts superseded by a different agent within this window count as "quick invalidations".
 _QUICK_INV_WINDOW_S = 3600.0  # 1 hour
+# Over-fetch multiplier for shared-pool recall: fetch N×top_k before trust discount so that
+# high-scoring low-trust facts don't crowd out lower-scoring high-trust ones before discounting.
+_POOL_RECALL_OVERFETCH = 3
 
 logger = logging.getLogger(__name__)
 
@@ -642,22 +646,40 @@ class KnowledgeBase:
         )
         return len(new_semantic)
 
-    async def arecall(self, query: str, *, top_k: int = 5, now: datetime | None = None) -> str:
+    async def arecall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        now: datetime | None = None,
+        include_unsupported: bool = False,
+    ) -> str:
         """Async variant of :meth:`recall` — non-blocking for asyncio applications.
 
         Args:
             query: What the agent needs to know right now.
             top_k: Maximum number of facts to return.
             now: Point-in-time for decay calculation (default: current UTC).
+            include_unsupported: Include facts with ``supported=False`` (default: False).
 
         Returns:
             Formatted multi-line string, or "" if no facts found.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: self.recall(query, top_k=top_k, now=now))
+        return await loop.run_in_executor(
+            None,
+            lambda: self.recall(
+                query, top_k=top_k, now=now, include_unsupported=include_unsupported
+            ),
+        )
 
     async def arecall_facts(
-        self, query: str, *, top_k: int = 5, now: datetime | None = None
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        now: datetime | None = None,
+        include_unsupported: bool = False,
     ) -> list[Fact]:
         """Async variant of :meth:`recall_facts` — non-blocking for asyncio applications.
 
@@ -665,13 +687,17 @@ class KnowledgeBase:
             query: What the agent needs to know right now.
             top_k: Maximum number of facts to return.
             now: Point-in-time for decay calculation (default: current UTC).
+            include_unsupported: Include facts with ``supported=False`` (default: False).
 
         Returns:
             List of relevant Facts (may be empty), sorted by relevance.
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, lambda: self.recall_facts(query, top_k=top_k, now=now)
+            None,
+            lambda: self.recall_facts(
+                query, top_k=top_k, now=now, include_unsupported=include_unsupported
+            ),
         )
 
     def _expand_query(self, query: str) -> tuple[str, dict[str, float] | None]:
@@ -715,6 +741,7 @@ class KnowledgeBase:
         top_k: int,
         now: datetime | None,
         excluded_ids: set[str] | None = None,
+        include_unsupported: bool = False,
     ) -> list[tuple[Fact, float]]:
         """Core recall logic shared by recall(), recall_facts(), recall_facts_with_scores().
 
@@ -727,14 +754,23 @@ class KnowledgeBase:
             now: Point-in-time for decay calculation (default: current UTC).
             excluded_ids: Fact IDs to exclude from results (e.g. already-seen facts
                 in a novelty-aware retrieval loop).  ``None`` means no exclusion.
+            include_unsupported: When False (default), facts with ``supported=False``
+                are excluded from retrieval. Pass True to include them (e.g. for
+                manual review workflows).
         """
         facts = self._storage.load(self._agent_id)
         if not facts:
             return []
 
         now_dt = now or datetime.now(UTC)
-        # Temporal filter + exclude episodic (raw buffer) in one pass.
-        facts = [f for f in facts if f.is_active(now_dt) and f.type != MemoryType.EPISODIC]
+        # Temporal filter + exclude episodic (raw buffer) + verification gate.
+        facts = [
+            f
+            for f in facts
+            if f.is_active(now_dt)
+            and f.type != MemoryType.EPISODIC
+            and (include_unsupported or f.supported is not False)
+        ]
         if not facts:
             return []
 
@@ -761,18 +797,28 @@ class KnowledgeBase:
         self._storage.save(self._agent_id, facts)
         return pairs
 
-    def recall(self, query: str, *, top_k: int = 5, now: datetime | None = None) -> str:
+    def recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        now: datetime | None = None,
+        include_unsupported: bool = False,
+    ) -> str:
         """Retrieve relevant facts as a formatted string for prompt injection.
 
         Args:
             query: What the agent needs to know right now.
             top_k: Maximum number of facts to return.
             now: Point-in-time for decay calculation (default: current UTC).
+            include_unsupported: Include facts with ``supported=False`` (default: False).
 
         Returns:
             Formatted multi-line string, or "" if no facts found.
         """
-        pairs = self._execute_recall(query, top_k=top_k, now=now)
+        pairs = self._execute_recall(
+            query, top_k=top_k, now=now, include_unsupported=include_unsupported
+        )
         if not pairs:
             return ""
         lines = [
@@ -796,6 +842,7 @@ class KnowledgeBase:
         top_k: int = 5,
         now: datetime | None = None,
         excluded_ids: set[str] | None = None,
+        include_unsupported: bool = False,
     ) -> list[Fact]:
         """Structured alternative to recall() — returns Fact objects.
 
@@ -807,13 +854,20 @@ class KnowledgeBase:
             top_k: Maximum number of facts to return.
             now: Point-in-time for decay calculation (default: current UTC).
             excluded_ids: Fact IDs to omit from results (novelty-aware retrieval).
+            include_unsupported: Include facts with ``supported=False`` (default: False).
 
         Returns:
             List of relevant Facts (may be empty), sorted by relevance.
         """
         return [
             f
-            for f, _ in self._execute_recall(query, top_k=top_k, now=now, excluded_ids=excluded_ids)
+            for f, _ in self._execute_recall(
+                query,
+                top_k=top_k,
+                now=now,
+                excluded_ids=excluded_ids,
+                include_unsupported=include_unsupported,
+            )
         ]
 
     def recall_facts_with_scores(
@@ -823,6 +877,7 @@ class KnowledgeBase:
         top_k: int = 5,
         now: datetime | None = None,
         excluded_ids: set[str] | None = None,
+        include_unsupported: bool = False,
     ) -> list[tuple[Fact, float]]:
         """Like recall_facts() but also returns the relevance score for each fact.
 
@@ -834,25 +889,37 @@ class KnowledgeBase:
             top_k: Maximum number of facts to return.
             now: Point-in-time for decay calculation (default: current UTC).
             excluded_ids: Fact IDs to omit from results (novelty-aware retrieval).
+            include_unsupported: Include facts with ``supported=False`` (default: False).
 
         Returns:
             List of (Fact, score) pairs sorted by relevance (most relevant first).
             Empty list if no facts stored or none match.
         """
-        return self._execute_recall(query, top_k=top_k, now=now, excluded_ids=excluded_ids)
+        return self._execute_recall(
+            query,
+            top_k=top_k,
+            now=now,
+            excluded_ids=excluded_ids,
+            include_unsupported=include_unsupported,
+        )
 
-    def recall_by_tag(self, tag: str) -> list[Fact]:
+    def recall_by_tag(self, tag: str, *, include_unsupported: bool = False) -> list[Fact]:
         """Return all facts that carry the given tag.
 
         Tags are assigned at add() time via the ``tags=`` parameter.
 
         Args:
             tag: The tag string to filter by.
+            include_unsupported: Include facts with ``supported=False`` (default: False).
 
         Returns:
             List of Facts whose tags include ``tag`` (may be empty).
         """
-        return [f for f in self._storage.load(self._agent_id) if tag in f.tags]
+        return [
+            f
+            for f in self._storage.load(self._agent_id)
+            if tag in f.tags and (include_unsupported or f.supported is not False)
+        ]
 
     def replace_facts(self, facts: list[Fact]) -> None:
         """Replace all stored facts with the given list (used for import).
@@ -1044,6 +1111,8 @@ class SharedMemoryPool:
         self._quick_inv_count: dict[str, int] = {}
         # MESI: per-agent high-water mark of versions pulled from shared pool.
         self._known_version: dict[str, int] = {}
+        # Serialise concurrent publish() calls on the same pool instance.
+        self._publish_lock = threading.Lock()
 
     def register(self, agent_id: str) -> None:
         """Register an agent to participate in the shared pool.
@@ -1130,6 +1199,11 @@ class SharedMemoryPool:
         if not to_publish:
             return []
 
+        with self._publish_lock:
+            return self._publish_locked(agent_id, to_publish)
+
+    def _publish_locked(self, agent_id: str, to_publish: list[Fact]) -> list[Fact]:
+        """Execute publish while holding ``_publish_lock``.  Called only from :meth:`publish`."""
         now = datetime.now(UTC)
         shared = self._storage.load(_SHARED_NAMESPACE)
 
@@ -1200,7 +1274,12 @@ class SharedMemoryPool:
         # Track publish counts for auto-trust.
         if published:
             self._publish_count[agent_id] = self._publish_count.get(agent_id, 0) + len(published)
-            self._storage.save(_SHARED_NAMESPACE, shared)
+            # Use BEGIN IMMEDIATE on SQLite/Postgres to prevent lost updates from
+            # concurrent processes; fall back to regular save() on YAML.
+            if isinstance(self._storage, TemporalStorageCapable):
+                self._storage.save_atomic(_SHARED_NAMESPACE, shared)
+            else:
+                self._storage.save(_SHARED_NAMESPACE, shared)
             logger.info(
                 "Agent '%s' published %d facts to shared pool",
                 agent_id,
@@ -1257,9 +1336,14 @@ class SharedMemoryPool:
         if not active:
             return []
 
-        pairs = self._retriever.search(query, active, top_k=top_k)
+        # Over-fetch so trust discount is applied before the top-k cutoff.
+        # Without this, low-trust facts can displace better candidates by scoring
+        # high in retrieval and then being down-ranked after the cut.
+        overfetch_k = min(top_k * _POOL_RECALL_OVERFETCH, len(active))
+        pairs = self._retriever.search(query, active, top_k=overfetch_k)
 
-        # Apply per-agent trust discount; track recall hits for auto-trust.
+        # Apply per-agent trust discount before final cutoff; track recall hits
+        # for auto-trust computation.
         discounted: list[tuple[Fact, float]] = []
         for fact, score in pairs:
             if fact.origin_agent_id and fact.origin_agent_id != requesting_agent_id:
