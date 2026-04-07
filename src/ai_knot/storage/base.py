@@ -76,6 +76,16 @@ class TemporalStorageCapable(Protocol):
         """
         ...
 
+    def save_atomic(self, agent_id: str, facts: list[Fact]) -> None:
+        """Atomically replace all facts for an agent using a database-level exclusive lock.
+
+        For SQLite this uses ``BEGIN IMMEDIATE`` to prevent other writers from
+        interleaving between the DELETE and INSERT operations.  YAML backends
+        can fall back to the regular ``save()`` but should be documented as
+        degraded (single-writer only).
+        """
+        ...
+
 
 @runtime_checkable
 class SnapshotCapable(Protocol):

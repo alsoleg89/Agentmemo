@@ -131,7 +131,18 @@ class PostgresStorage:
 
     def save(self, agent_id: str, facts: list[Fact]) -> None:
         """Replace all facts for an agent."""
-        rows = [
+        rows = self._build_rows(facts, agent_id)
+        self._execute_save(agent_id, rows)
+        logger.debug("Saved %d facts for agent '%s'", len(facts), agent_id)
+
+    def save_atomic(self, agent_id: str, facts: list[Fact]) -> None:
+        """Atomically replace facts. PostgreSQL transactions are always serializable."""
+        rows = self._build_rows(facts, agent_id)
+        self._execute_save(agent_id, rows)
+        logger.debug("Atomically saved %d facts for agent '%s'", len(facts), agent_id)
+
+    def _build_rows(self, facts: list[Fact], agent_id: str) -> list[tuple]:  # type: ignore[type-arg]
+        return [
             (
                 fact.id,
                 agent_id,
@@ -168,6 +179,8 @@ class PostgresStorage:
             )
             for fact in facts
         ]
+
+    def _execute_save(self, agent_id: str, rows: list[tuple]) -> None:  # type: ignore[type-arg]
         with self._get_conn() as conn:
             conn.execute('DELETE FROM "ai-knot_facts" WHERE agent_id = %s', (agent_id,))
             conn.executemany(
@@ -187,7 +200,6 @@ class PostgresStorage:
                 rows,
             )
             conn.commit()
-        logger.debug("Saved %d facts for agent '%s'", len(facts), agent_id)
 
     def load(self, agent_id: str) -> list[Fact]:
         """Load all facts for an agent."""
