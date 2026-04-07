@@ -34,7 +34,7 @@ import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
-from tests.eval.benchmark.base import ScenarioResult, SingleAgentMemoryBackend
+from tests.eval.benchmark.base import MemoryBackend, ScenarioResult
 from tests.eval.benchmark.judge import BaseJudge
 
 SCENARIO_ID = "s_locomo"
@@ -114,7 +114,7 @@ def _best_f1_against(retrieved_texts: list[str], gold: str) -> float:
 
 
 async def run(
-    backend: SingleAgentMemoryBackend,
+    backend: MemoryBackend,
     judge: BaseJudge,
     *,
     locomo_file: str | None = None,

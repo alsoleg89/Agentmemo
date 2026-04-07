@@ -13,6 +13,7 @@ class InsertResult:
     facts_stored: int  # total facts in store after this insert
     facts_extracted: int  # facts returned by extraction (before dedup/filter)
     insert_ms: float  # wall time for the insert operation
+    extraction_tokens: int = 0  # approximate tokens spent on LLM extraction (0 for no-LLM backends)
 
 
 @dataclass
@@ -158,8 +159,13 @@ class MultiAgentMemoryBackend(abc.ABC):
         ...
 
     @abc.abstractmethod
-    async def publish_to_pool(self, agent_id: str) -> int:
+    async def publish_to_pool(self, agent_id: str, *, utility_threshold: float = 0.0) -> int:
         """Publish all of agent's active facts to the shared pool.
+
+        Args:
+            utility_threshold: Minimum utility score (state_confidence × importance)
+                for a fact to be published. Facts below this threshold are filtered.
+                Default 0.0 publishes everything.
 
         Returns:
             Number of facts published.
@@ -190,3 +196,28 @@ class MultiAgentMemoryBackend(abc.ABC):
         Used by S11 to verify token-efficient incremental sync.
         """
         ...
+
+    async def insert_for_agent_with_meta(
+        self,
+        agent_id: str,
+        text: str,
+        *,
+        topic_channel: str = "",
+        importance: float = 0.5,
+    ) -> InsertResult:
+        """Insert with topic_channel and importance metadata.
+
+        Default: delegates to insert_for_agent (ignores metadata).
+        Override in backends that support topic routing and utility gating.
+        """
+        return await self.insert_for_agent(agent_id, text)
+
+    async def pool_retrieve_for_channel(
+        self, agent_id: str, query: str, *, top_k: int = 5, topic_channel: str = ""
+    ) -> RetrievalResult:
+        """Retrieve from pool filtered by topic_channel.
+
+        Default: delegates to pool_retrieve (no channel filter).
+        Override in backends that support topic channel routing.
+        """
+        return await self.pool_retrieve(agent_id, query, top_k=top_k)
