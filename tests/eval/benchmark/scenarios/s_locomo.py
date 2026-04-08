@@ -19,12 +19,13 @@ Dataset is downloaded on first run and cached in the system temp directory.
 Pass ``--locomo-file /path/to/locomo10.json`` to use a local copy.
 
 Metrics:
-  overall_f1        — mean best-doc token F1 over all 10 conversations
-  single_hop_f1     — category 1 questions
-  multi_hop_f1      — category 2 questions
-  temporal_f1       — category 3 questions
-  open_ended_f1     — category 4 questions
-  adversarial_f1    — category 5 questions (uses adversarial_answer as gold)
+  overall_f1          — mean best-doc token F1 over all 10 conversations
+  single_hop_f1       — category 1 questions
+  multi_hop_f1        — category 2 questions
+  temporal_f1         — category 3 questions
+  open_ended_f1       — category 4 questions
+  adversarial_f1      — category 5 questions (uses adversarial_answer as gold)
+  evidence_recall_at5 — fraction of evidence turns found in top-5 retrieved texts
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from ai_knot.tokenizer import tokenize
+from tests.eval.benchmark._eval_utils import hit_rank_lexical
 from tests.eval.benchmark.base import MemoryBackend, ScenarioResult
 from tests.eval.benchmark.judge import BaseJudge
 
@@ -83,13 +86,17 @@ def _load_locomo(local_path: str | None = None) -> list[dict[str, Any]]:
         return result
 
 
-def _iter_turns(sample: dict[str, Any]) -> list[str]:
-    """Flatten all sessions in a LoCoMo sample into a list of ``speaker: text`` strings.
+def _iter_turns(sample: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    """Flatten all sessions in a LoCoMo sample into turn strings and a dia_id map.
 
     The real LoCoMo schema stores sessions inside ``sample["conversation"]``
     as ``session_1``, ``session_2``, …  alongside ``session_N_date_time`` keys
     and ``speaker_a`` / ``speaker_b``.  We extract only ``session_N`` lists,
     sort them by *N*, and yield each turn.
+
+    Returns:
+        Tuple of (turn_texts, dia_map) where dia_map maps ``dia_id`` to the
+        corresponding ``"speaker: text"`` string for evidence-based evaluation.
     """
     conversation = sample.get("conversation", sample)
     # Collect (session_number, key) pairs and sort by number.
@@ -101,6 +108,7 @@ def _iter_turns(sample: dict[str, Any]) -> list[str]:
     numbered.sort()
 
     turns: list[str] = []
+    dia_map: dict[str, str] = {}
     for _n, key in numbered:
         session = conversation[key]
         if not isinstance(session, list):
@@ -108,8 +116,12 @@ def _iter_turns(sample: dict[str, Any]) -> list[str]:
         for turn in session:
             if isinstance(turn, dict) and "text" in turn:
                 speaker = turn.get("speaker", "speaker")
-                turns.append(f"{speaker}: {turn['text']}")
-    return turns
+                turn_text = f"{speaker}: {turn['text']}"
+                turns.append(turn_text)
+                dia_id = turn.get("dia_id")
+                if isinstance(dia_id, str):
+                    dia_map[dia_id] = turn_text
+    return turns, dia_map
 
 
 def _best_f1_against(retrieved_texts: list[str], gold: str) -> float:
@@ -119,13 +131,13 @@ def _best_f1_against(retrieved_texts: list[str], gold: str) -> float:
     """
     if not retrieved_texts:
         return 0.0
-    gold_tokens = gold.lower().split()
+    gold_tokens = tokenize(gold)
     if not gold_tokens:
         return 0.0
     gold_set = set(gold_tokens)
     best = 0.0
     for text in retrieved_texts:
-        pred_tokens = text.lower().split()
+        pred_tokens = tokenize(text)
         if not pred_tokens:
             continue
         pred_set = set(pred_tokens)
@@ -138,6 +150,32 @@ def _best_f1_against(retrieved_texts: list[str], gold: str) -> float:
         if f1 > best:
             best = f1
     return best
+
+
+def _evidence_recall_at_k(
+    retrieved_texts: list[str],
+    evidence_ids: list[str],
+    dia_map: dict[str, str],
+    *,
+    threshold: float = 0.5,
+) -> float:
+    """Fraction of evidence turns found in the retrieved texts.
+
+    Each ``evidence_id`` is resolved to its original turn text via *dia_map*.
+    A hit is counted when ``hit_rank_lexical`` (ATC-based, deterministic)
+    finds the evidence text among *retrieved_texts* at any rank.
+
+    Returns 0.0 when no evidence IDs can be resolved.
+    """
+    resolved = [dia_map[eid] for eid in evidence_ids if eid in dia_map]
+    if not resolved:
+        return 0.0
+    hits = sum(
+        1
+        for ev_text in resolved
+        if hit_rank_lexical(ev_text, retrieved_texts, threshold=threshold) is not None
+    )
+    return hits / len(resolved)
 
 
 async def run(
@@ -176,6 +214,7 @@ async def run(
     # f1_by_cat[category] → list of per-pair F1 scores
     f1_by_cat: dict[int, list[float]] = defaultdict(list)
     all_f1: list[float] = []
+    all_evidence_recall: list[float] = []
     total_turns_ingested = 0
     total_qa = 0
     total_qa_scored = 0
@@ -185,7 +224,7 @@ async def run(
         await backend.reset()
 
         # Phase 1: ingest all turns.
-        turn_texts = _iter_turns(conv)
+        turn_texts, dia_map = _iter_turns(conv)
         for turn_text in turn_texts:
             await backend.insert(turn_text)
         total_turns_ingested += len(turn_texts)
@@ -222,6 +261,12 @@ async def run(
             if category in _CAT_NAME:
                 f1_by_cat[category].append(f1)
 
+            # Evidence-based retrieval recall.
+            evidence_ids: list[str] = qa.get("evidence", [])
+            if evidence_ids and dia_map:
+                ev_recall = _evidence_recall_at_k(result.texts, evidence_ids, dia_map)
+                all_evidence_recall.append(ev_recall)
+
     if not all_f1:
         return ScenarioResult(
             scenario_id=SCENARIO_ID,
@@ -239,11 +284,17 @@ async def run(
             cat_scores = f1_by_cat[cat_id]
             scores[name] = [sum(cat_scores) / len(cat_scores)]
 
+    ev_recall_mean = 0.0
+    if all_evidence_recall:
+        ev_recall_mean = sum(all_evidence_recall) / len(all_evidence_recall)
+        scores["evidence_recall_at5"] = [ev_recall_mean]
+
     n_convs = len(dataset)
     notes = (
         f"conversations={n_convs}, turns_ingested={total_turns_ingested}, "
         f"qa_total={total_qa}, qa_scored={total_qa_scored}, "
-        f"empty_retrievals={total_empty_retrievals}, overall_f1={overall:.3f}"
+        f"empty_retrievals={total_empty_retrievals}, overall_f1={overall:.3f}, "
+        f"evidence_recall@5={ev_recall_mean:.3f}"
     )
 
     return ScenarioResult(

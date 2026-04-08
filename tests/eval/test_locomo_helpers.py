@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from tests.eval.benchmark.scenarios.s_locomo import _best_f1_against, _iter_turns
+from tests.eval.benchmark.scenarios.s_locomo import (
+    _best_f1_against,
+    _evidence_recall_at_k,
+    _iter_turns,
+)
 
 
 class TestBestF1Against:
@@ -57,8 +61,9 @@ class TestIterTurns:
                 ],
             }
         )
-        turns = _iter_turns(sample)
+        turns, dia_map = _iter_turns(sample)
         assert turns == ["Alice: Hello", "Bob: Hi there"]
+        assert dia_map == {"D1:1": "Alice: Hello", "D1:2": "Bob: Hi there"}
 
     def test_skips_date_time_keys(self) -> None:
         sample = self._make_sample(
@@ -69,8 +74,9 @@ class TestIterTurns:
                 "session_1": [{"speaker": "Alice", "text": "No date", "dia_id": "D1:1"}],
             }
         )
-        turns = _iter_turns(sample)
+        turns, dia_map = _iter_turns(sample)
         assert turns == ["Alice: No date"]
+        assert dia_map == {"D1:1": "Alice: No date"}
 
     def test_skips_non_session_keys(self) -> None:
         sample = {
@@ -81,8 +87,9 @@ class TestIterTurns:
             },
             "qa": [{"question": "What?", "answer": "42"}],
         }
-        turns = _iter_turns(sample)
+        turns, dia_map = _iter_turns(sample)
         assert turns == ["Alice: Real turn"]
+        assert dia_map == {"D1:1": "Alice: Real turn"}
 
     def test_default_speaker(self) -> None:
         sample = self._make_sample(
@@ -90,8 +97,9 @@ class TestIterTurns:
                 "session_1": [{"text": "No speaker field", "dia_id": "D1:1"}],
             }
         )
-        turns = _iter_turns(sample)
+        turns, dia_map = _iter_turns(sample)
         assert turns == ["speaker: No speaker field"]
+        assert dia_map == {"D1:1": "speaker: No speaker field"}
 
     def test_multiple_sessions_sorted(self) -> None:
         """Sessions must be sorted by number, not by dict iteration order."""
@@ -107,17 +115,72 @@ class TestIterTurns:
                 "session_2_date_time": "2pm",
             }
         )
-        turns = _iter_turns(sample)
+        turns, dia_map = _iter_turns(sample)
         assert turns == ["A: one", "B: two", "A: three"]
+        assert dia_map == {"D1:1": "A: one", "D2:1": "B: two", "D3:1": "A: three"}
 
     def test_empty_conversation(self) -> None:
         sample = self._make_sample({"speaker_a": "A", "speaker_b": "B"})
-        assert _iter_turns(sample) == []
+        turns, dia_map = _iter_turns(sample)
+        assert turns == []
+        assert dia_map == {}
 
     def test_fallback_flat_sample(self) -> None:
         """Graceful fallback: if sample has no 'conversation' key, iterate top-level."""
         flat = {
             "session_1": [{"speaker": "X", "text": "hi", "dia_id": "D1:1"}],
         }
-        turns = _iter_turns(flat)
+        turns, dia_map = _iter_turns(flat)
         assert turns == ["X: hi"]
+        assert dia_map == {"D1:1": "X: hi"}
+
+    def test_turn_without_dia_id(self) -> None:
+        """Turns missing dia_id should still appear in turns but not in dia_map."""
+        sample = self._make_sample(
+            {
+                "session_1": [
+                    {"speaker": "A", "text": "has id", "dia_id": "D1:1"},
+                    {"speaker": "B", "text": "no id"},
+                ],
+            }
+        )
+        turns, dia_map = _iter_turns(sample)
+        assert turns == ["A: has id", "B: no id"]
+        assert dia_map == {"D1:1": "A: has id"}
+
+
+class TestEvidenceRecallAtK:
+    def test_all_evidence_found(self) -> None:
+        dia_map = {"D1:1": "Alice: Hello there", "D1:2": "Bob: Hi friend"}
+        retrieved = ["Alice: Hello there", "Bob: Hi friend", "noise"]
+        assert _evidence_recall_at_k(retrieved, ["D1:1", "D1:2"], dia_map) == 1.0
+
+    def test_partial_evidence(self) -> None:
+        dia_map = {"D1:1": "Alice: Hello there", "D1:2": "Bob: Hi friend"}
+        retrieved = ["Alice: Hello there", "unrelated stuff"]
+        score = _evidence_recall_at_k(retrieved, ["D1:1", "D1:2"], dia_map)
+        assert score == 0.5
+
+    def test_no_evidence_found(self) -> None:
+        dia_map = {"D1:1": "Alice: very specific unique topic xyz"}
+        retrieved = ["completely unrelated text about something else"]
+        score = _evidence_recall_at_k(retrieved, ["D1:1"], dia_map)
+        assert score == 0.0
+
+    def test_empty_evidence_ids(self) -> None:
+        assert _evidence_recall_at_k(["text"], [], {}) == 0.0
+
+    def test_missing_dia_id_skipped(self) -> None:
+        """Evidence IDs not in dia_map are skipped; recall is over resolved only."""
+        dia_map = {"D1:1": "Alice: Hello"}
+        # D1:2 not in dia_map → only D1:1 counts, and it's found
+        score = _evidence_recall_at_k(["Alice: Hello"], ["D1:1", "D1:2"], dia_map)
+        assert score == 1.0
+
+    def test_all_ids_missing(self) -> None:
+        """If no evidence IDs resolve, return 0.0."""
+        assert _evidence_recall_at_k(["text"], ["D99:1"], {}) == 0.0
+
+    def test_empty_retrieved(self) -> None:
+        dia_map = {"D1:1": "Alice: Hello"}
+        assert _evidence_recall_at_k([], ["D1:1"], dia_map) == 0.0
