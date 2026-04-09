@@ -51,6 +51,8 @@ def _build_kb() -> KnowledgeBase:
     - ``AI_KNOT_RRF_WEIGHTS``       — comma-separated RRF weights (6 floats)
     - ``AI_KNOT_EXPANSION_WEIGHT``  — float, LLM expansion blend weight
     - ``AI_KNOT_EPISODIC_TTL``      — float, episodic TTL in hours
+    - ``AI_KNOT_EMBED_URL``         — Ollama base URL for embeddings
+    - ``AI_KNOT_EMBED_MODEL``       — embedding model (default: nomic-embed-text)
 
     Returns:
         A configured KnowledgeBase instance.
@@ -77,6 +79,9 @@ def _build_kb() -> KnowledgeBase:
     raw_ttl = os.environ.get("AI_KNOT_EPISODIC_TTL")
     episodic_ttl_hours = float(raw_ttl) if raw_ttl else 72.0
 
+    embed_url = os.environ.get("AI_KNOT_EMBED_URL", "http://localhost:11434")
+    embed_model = os.environ.get("AI_KNOT_EMBED_MODEL", "nomic-embed-text")
+
     return KnowledgeBase(
         agent_id=agent_id,
         storage=storage,
@@ -87,6 +92,8 @@ def _build_kb() -> KnowledgeBase:
         rrf_weights=rrf_weights,
         expansion_weight=expansion_weight,
         episodic_ttl_hours=episodic_ttl_hours,
+        embed_url=embed_url,
+        embed_model=embed_model,
     )
 
 
