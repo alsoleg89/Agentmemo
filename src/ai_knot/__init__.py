@@ -16,7 +16,7 @@ from ai_knot.types import (
     SnapshotDiff,
 )
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"
 
 __all__ = [
     "CONFLICT_POLICIES",
