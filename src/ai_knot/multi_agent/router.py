@@ -51,15 +51,16 @@ _MULTI_SOURCE_STEMS = frozenset(
 
 
 def _is_incident_query(tokens: set[str], q_lower: str) -> bool:
-    """Return True if *tokens* signal an incident intent.
+    """Return True if the query signals an incident intent.
 
-    Weak-only signals (deploy, rollout) without a strong stem or time pattern
-    are not treated as incident — they match too many non-incident queries.
+    A time pattern (e.g. "10:30") or a strong incident stem (error, outage…)
+    is sufficient on its own.  Weak stems (deploy, rollout) only qualify when
+    paired with one of the above — prevents "How do teams deploy?" → INCIDENT.
     """
-    return bool(
-        tokens & _INCIDENT_STEMS
-        and (_TIME_PATTERN.search(q_lower) or tokens & _INCIDENT_STRONG_STEMS)
-    )
+    if _TIME_PATTERN.search(q_lower) or tokens & _INCIDENT_STRONG_STEMS:
+        return True
+    # Weak stems alone are not sufficient.
+    return False
 
 
 # Stopword token set used by exploration mode classification —
