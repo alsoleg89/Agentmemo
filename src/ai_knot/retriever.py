@@ -19,6 +19,7 @@ from ai_knot._inverted_index import (
     _slot_exact_score,
     _trigram_jaccard_against,
 )
+from ai_knot.tokenizer import tokenize as _tokenize
 from ai_knot.types import Fact
 
 # Default RRF weights for hybrid fusion: BM25 gets 2x the dense weight,
@@ -33,6 +34,7 @@ __all__ = [
     "InvertedIndex",
     "DenseRetriever",
     "HybridRetriever",
+    "_tokenize",
     "_prf_expand",
     "_rrf_fuse",
     "_char_trigrams",
