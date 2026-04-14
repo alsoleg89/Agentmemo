@@ -324,10 +324,24 @@ def tool_ingest_episode(
     """
     from datetime import UTC, datetime
 
-    obs = datetime.fromisoformat(observed_at) if observed_at else datetime.now(UTC)
-    sdate = datetime.fromisoformat(session_date) if session_date else None
-
     try:
+        obs = datetime.fromisoformat(observed_at) if observed_at else datetime.now(UTC)
+        _sdate_raw = session_date.strip() if session_date else None
+        # session_date may arrive in non-ISO forms (e.g. "8 May, 2023"). Try ISO
+        # parse first; fall back to dateutil if available; otherwise drop the
+        # anchor so ingestion still succeeds.
+        sdate: datetime | None = None
+        if _sdate_raw:
+            try:
+                sdate = datetime.fromisoformat(_sdate_raw)
+            except ValueError:
+                try:
+                    from dateutil import parser as _dp  # type: ignore[import-untyped]
+
+                    sdate = _dp.parse(_sdate_raw)
+                except Exception:
+                    sdate = None  # drop non-parseable date; ingestion still works
+
         episode = kb.ingest_episode(
             session_id=session_id,
             turn_id=turn_id,

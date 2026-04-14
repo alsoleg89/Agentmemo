@@ -84,6 +84,13 @@ export class AiknotAdapter {
       const sessionId = session.date
         ? `session-${session.date}`
         : `session-${sessions.indexOf(session)}`;
+      // LoCoMo dates are like "8 May, 2023" — convert to ISO so Python's
+      // fromisoformat() can parse them. If the parse fails, omit the anchor.
+      let sessionDateIso: string | undefined;
+      if (session.date) {
+        const parsed = new Date(session.date);
+        sessionDateIso = isNaN(parsed.getTime()) ? undefined : parsed.toISOString().slice(0, 10);
+      }
       for (let i = 0; i < session.turns.length; i++) {
         const turnText = session.turns[i] ?? "";
         if (!turnText.trim()) continue;
@@ -96,7 +103,7 @@ export class AiknotAdapter {
           turnId: `turn-${i}`,
           rawText: turnText,
           speaker,
-          sessionDate: session.date ?? undefined,
+          sessionDate: sessionDateIso,
           sourceMeta: { dataset: "locomo", sessionIdx: sessions.indexOf(session) },
         });
       }
