@@ -92,7 +92,7 @@ def enrich_date_tags(fact: Fact) -> Fact:
 
     Mode-agnostic: works on ``fact.content`` regardless of ingest path (raw /
     dated / learn).  Tags are indexed by BM25F at weight 2.0, so date-queries
-    are matched more reliably for temporal and multi-hop (Cat2) questions.
+    are matched more reliably for temporal and multi-hop questions.
 
     Canonical forms injected for each parsed date:
     - ISO day  ``"2023-06-27"``     (only when day is available)

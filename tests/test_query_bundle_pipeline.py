@@ -172,3 +172,31 @@ def test_p5_mcp_tool_falls_back_on_not_implemented(tmp_path: object, monkeypatch
     out = _mcp_tools.tool_query(kb, "Who is Eve?", top_k=5)
     assert isinstance(out, str)
     assert out, "fallback recall must return a non-empty string"
+
+
+# ---------------------------------------------------------------------------
+# P6 — re-ingesting the same (session_id, turn_id) replaces claims
+# ---------------------------------------------------------------------------
+
+
+def test_p6_reingest_same_turn_replaces_claims(tmp_path: object) -> None:
+    """Re-ingesting the same turn must replace old claims, not accumulate them."""
+    kb = _kb(tmp_path)
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="t0",
+        speaker="user",
+        observed_at=NOW,
+        raw_text="Alice is a software engineer.",
+    )
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="t0",
+        speaker="user",
+        observed_at=NOW,
+        raw_text="Alice is a manager.",
+    )
+    claims = kb._storage.load_claims("a", active_only=True)
+    values = " ".join(c.value_text for c in claims if c.subject == "Alice").lower()
+    assert "manager" in values, "new claim must be present after re-ingest"
+    assert "software engineer" not in values, "stale claim must be gone after re-ingest"

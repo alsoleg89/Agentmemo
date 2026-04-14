@@ -95,6 +95,10 @@ class SQLiteStorage:
     more robustness than YAML files but don't need a separate DB server.
     """
 
+    #: v2 query-plane capability flag — checked by KnowledgeBase.query() and
+    #: ingest_episode() as an explicit guard instead of Protocol isinstance().
+    supports_v2_query_planes: bool = True
+
     def __init__(self, db_path: str = ".ai_knot/ai_knot.db") -> None:
         self._db_path = db_path
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -732,7 +736,9 @@ class SQLiteStorage:
     # BundleStore (v2)
     # ------------------------------------------------------------------ #
 
-    def save_bundles(self, agent_id: str, bundles: list[Any], memberships: dict[str, list[str]]) -> None:
+    def save_bundles(
+        self, agent_id: str, bundles: list[Any], memberships: dict[str, list[str]]
+    ) -> None:
         """Persist bundles and their member claim lists."""
         if not bundles:
             return

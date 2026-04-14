@@ -106,9 +106,7 @@ class TestEntityTopicBundles:
 
     def test_bundle_kind_is_entity_topic(self):
         claims = [_make_claim("Alice", "job")]
-        bundles, _ = build_entity_topic_bundles(
-            claims, agent_id=AGENT, materialization_version=VER
-        )
+        bundles, _ = build_entity_topic_bundles(claims, agent_id=AGENT, materialization_version=VER)
         assert all(b.kind is BundleKind.ENTITY_TOPIC for b in bundles)
 
     def test_empty_claims_returns_empty(self):
@@ -182,9 +180,7 @@ class TestRelationSupportBundles:
 class TestEventNeighborhoodBundles:
     def test_event_bundle_created_for_event_claims(self):
         episode = _make_episode("Alice attended a conference in June.")
-        claims = [
-            _make_claim("Alice", "attended", "conference", kind=ClaimKind.EVENT)
-        ]
+        claims = [_make_claim("Alice", "attended", "conference", kind=ClaimKind.EVENT)]
         bundles, _ = build_event_neighborhood_bundles(
             claims, [episode], agent_id=AGENT, materialization_version=VER
         )

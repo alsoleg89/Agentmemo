@@ -99,7 +99,7 @@ class TestQueryPipeline:
                 observed_at=NOW,
                 raw_text=f"Alice enjoys {hobby} in her free time.",
             )
-        answer = kb.query("What hobbies does Alice have?", now=NOW)
+        answer = kb.query("List all hobbies Alice has.", now=NOW)
         # SET question → set_collect strategy
         assert answer.trace.strategy == "set_collect"
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import asdict
 
 from ai_knot.knowledge import KnowledgeBase
 from ai_knot.types import ConversationTurn, MemoryType
@@ -420,7 +421,7 @@ def tool_rebuild_materialized(
     """
     try:
         report = kb.rebuild_materialized(scope=scope, force=force)
-        return json.dumps(report, ensure_ascii=False)
+        return json.dumps(asdict(report), ensure_ascii=False)
     except AttributeError:
         return json.dumps({"error": "rebuild_materialized not available on this storage backend"})
     except Exception as exc:

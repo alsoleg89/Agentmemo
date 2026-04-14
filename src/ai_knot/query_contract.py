@@ -8,7 +8,7 @@ Design rules:
     EvidenceProfile (i.e., when direct evidence is absent).
 
 Enforced by: scripts/check_query_runtime_isolation.py (no storage access)
-             tests/test_query_contract.py (product queries, no LoCoMo branching)
+             tests/test_query_contract.py (product queries, no benchmark-label branching)
 """
 
 from __future__ import annotations
@@ -267,22 +267,24 @@ def _detect_geometry(question: str, tokens: list[str]) -> AnswerSpace:
     # Question begins with "what" + noun (likely set or description).
     token_set = set(tokens[:8])  # look at first 8 tokens
 
-    # Structural SET signals — avoids hardcoded noun lists.
+    # Structural SET signals — explicit aggregation cues only, no plural-noun heuristic.
     if tokens and tokens[0] == "what":
         tail = tokens[1:4]
-        # Plural-noun heuristic: ends in 's' (not 'ss'), length > 3, no apostrophe
-        # (apostrophe indicates possessive, not plural).
-        if any(
-            t.endswith("s") and not t.endswith("ss") and len(t) > 3 and "'" not in t for t in tail
-        ):
-            return AnswerSpace.SET
-        if "all" in tail or "list" in tail:
+        if "all" in tail or "list" in tail or "enumerate" in tail:
             return AnswerSpace.SET
 
-    # "list / enumerate / name all / what are all" → SET
-    if token_set & {"list", "enumerate"}:
+    # Imperative aggregation: "name every …", "list …", "enumerate …"
+    if tokens and tokens[0] in {"name", "list", "enumerate"}:
         return AnswerSpace.SET
+
+    # "what are all …" — explicit all-enumeration phrasing
     if "all" in token_set and "what" in token_set:
+        return AnswerSpace.SET
+
+    # "which are …" phrase
+    if ("which are" in q_lower or "what are" in q_lower) and (
+        "all" in token_set or "list" in token_set or "enumerate" in token_set
+    ):
         return AnswerSpace.SET
 
     # "who" → ENTITY

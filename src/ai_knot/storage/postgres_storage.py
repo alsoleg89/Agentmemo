@@ -72,6 +72,10 @@ class PostgresStorage:
             (e.g. ``postgresql://user:pass@host:5432/db``).
     """
 
+    #: v2 query-plane capability flag — False until Track A methods are implemented.
+    #: Flip to True and add integration tests when Postgres v2 planes are ready.
+    supports_v2_query_planes: bool = False
+
     def __init__(self, dsn: str) -> None:
         try:
             import psycopg  # noqa: F401
@@ -372,9 +376,7 @@ class PostgresStorage:
     ) -> list[Any]:
         raise NotImplementedError("Postgres v2 plane not yet implemented")
 
-    def load_bundle_members(
-        self, agent_id: str, bundle_ids: list[str]
-    ) -> dict[str, list[str]]:
+    def load_bundle_members(self, agent_id: str, bundle_ids: list[str]) -> dict[str, list[str]]:
         raise NotImplementedError("Postgres v2 plane not yet implemented")
 
     def invalidate_by_keys(self, agent_id: str, keys: list[Any]) -> int:

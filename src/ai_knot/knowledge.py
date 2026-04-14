@@ -606,6 +606,12 @@ class KnowledgeBase(_LearningMixin):
         if not candidate_facts:
             return []
 
+        # No pre-pipeline entity narrowing: the pipeline runs on the full
+        # candidate_facts so Channel C (entity hop via value_text) can traverse
+        # entity links (e.g. Tim → wife=Maria → Maria's employer).  BM25 naturally
+        # ranks entity-mentioning facts first.  Post-pipeline supplementation (below)
+        # handles the fallback case when BM25 returns fewer than top_k results.
+
         # Build InvertedIndex once — used for BM25 scoring, IDF lookup, Channel B.
         index = InvertedIndex(candidate_facts)
 
@@ -621,6 +627,8 @@ class KnowledgeBase(_LearningMixin):
 
         # Channel A: all facts with positive raw BM25F score.
         # E2.2: field_weights_override lets NAVIGATIONAL intent boost tags/canonical.
+        # When entity-scoping fell back to full corpus, pre-seed with all IDs so
+        # BM25=0 facts can still be ranked by recency/importance and fill top_k.
         bm25_raw = index.score(query, field_weights_override=config.field_weights_override)
         candidate_ids: set[str] = {fid for fid, s in bm25_raw.items() if s > 0}
         _trace_ch_a = set(candidate_ids) if trace is not None else None
@@ -852,6 +860,24 @@ class KnowledgeBase(_LearningMixin):
                 "post_mmr_ids": [f.id for f, _ in pairs],
                 "dropped_ids": [fid for fid in (_trace_pre_mmr_ids or []) if fid not in _post_mmr],
             }
+
+        # --- Post-pipeline supplement ---
+        # When BM25+pipeline returns fewer than top_k results (e.g. only entity-
+        # mentioning facts scored positively), fill remaining slots from candidate_facts
+        # ordered by importance/recency.  This implements the "scoped set < top_k →
+        # fall back to full corpus" contract without pre-pipeline narrowing (which would
+        # break Channel C entity-hop traversal).
+        if len(pairs) < top_k:
+            returned_ids_now = {f.id for f, _ in pairs}
+            extra = sorted(
+                (f for f in candidate_facts if f.id not in returned_ids_now),
+                key=lambda f: (f.importance, f.created_at),
+                reverse=True,
+            )
+            for f in extra:
+                pairs.append((f, 0.0))
+                if len(pairs) >= top_k:
+                    break
 
         # Update access metadata on the *original* (unfiltered) fact objects so
         # that the subsequent save persists ALL facts, not just the filtered set.
@@ -1374,18 +1400,19 @@ class KnowledgeBase(_LearningMixin):
             parent_episode_id=parent_episode_id,
         )
 
-        if not isinstance(self._storage, RawEpisodeStore):
+        if not getattr(self._storage, "supports_v2_query_planes", False):
             raise TypeError(
                 f"Storage backend {type(self._storage).__name__} does not support "
-                f"raw episodes. Use SQLiteStorage or PostgresStorage."
+                f"v2 query planes (supports_v2_query_planes=False). Use SQLiteStorage."
             )
 
-        self._storage.save_episodes(self._agent_id, [episode])
+        if isinstance(self._storage, RawEpisodeStore):
+            self._storage.save_episodes(self._agent_id, [episode])
 
         if materialize:
             claims = materialize_episode(episode)
-            if claims and hasattr(self._storage, "save_claims"):
-                self._storage.save_claims(self._agent_id, claims)
+            if claims and isinstance(self._storage, ClaimStore):
+                self._storage.replace_claims_for_episodes(self._agent_id, [episode.id], claims)
                 dirty = dirty_keys_for_claims(claims)
                 if dirty and isinstance(self._storage, MaterializationMetaStore):
                     import json as _json
@@ -1440,7 +1467,7 @@ class KnowledgeBase(_LearningMixin):
         eps = list(episodes)
         if not eps:
             return
-        if not isinstance(self._storage, RawEpisodeStore):
+        if not getattr(self._storage, "supports_v2_query_planes", False):
             raise TypeError(
                 f"Storage backend {type(self._storage).__name__} does not support raw episodes."
             )
@@ -1454,11 +1481,16 @@ class KnowledgeBase(_LearningMixin):
                 UserWarning,
                 stacklevel=2,
             )
-        self._storage.save_episodes(self._agent_id, eps)
+        if isinstance(self._storage, RawEpisodeStore):
+            self._storage.save_episodes(self._agent_id, eps)
 
-        if materialize and hasattr(self._storage, "save_claims"):
+        if materialize and isinstance(self._storage, ClaimStore):
             claims = rebuild_claims_from_raw(eps)
             if claims:
+                # Replace any existing claims for these episodes before saving new ones
+                # so that re-ingesting the same (session, turn) ids is idempotent.
+                ep_ids = [e.id for e in eps]
+                self._storage.replace_claims_for_episodes(self._agent_id, ep_ids, [])
                 self._storage.save_claims(self._agent_id, claims)
                 dirty = dirty_keys_for_claims(claims)
                 if dirty and isinstance(self._storage, MaterializationMetaStore):
@@ -1523,10 +1555,10 @@ class KnowledgeBase(_LearningMixin):
         """
         from ai_knot.query_runtime import execute_query
 
-        if not isinstance(self._storage, ClaimStore):
+        if not getattr(self._storage, "supports_v2_query_planes", False):
             raise RuntimeError(
-                "query() requires a storage backend that supports v2 query planes "
-                "(SQLiteStorage or PostgresStorage). Current backend: "
+                "query() requires a storage backend with supports_v2_query_planes=True. "
+                "Current backend: "
                 f"{type(self._storage).__name__}"
             )
 
