@@ -153,3 +153,133 @@ def apply_decay(
         else:
             fact.retention_score = calculate_retention(fact, now=now, type_exponents=type_exponents)
     return facts
+
+
+# ---------------------------------------------------------------------------
+# New-gen three-axis decay functions (Track A)
+# ---------------------------------------------------------------------------
+
+
+def calculate_truth_validity(
+    valid_from: datetime,
+    valid_until: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> float:
+    """Compute truth validity for an AtomicClaim.
+
+    Truth validity encodes the logical truth window of a claim:
+    - Before ``valid_from``: always 0.0 (claim hasn't become true yet).
+    - Within [valid_from, valid_until]: 1.0 (currently true).
+    - After ``valid_until``: 0.0 (claim expired / superseded).
+    - ``valid_until=None`` means indefinitely true → 1.0 as long as ``now >= valid_from``.
+
+    This axis is NEVER decayed by the forgetting curve — it reflects logical
+    supersession, not memory fading. Raw episodes are never archived by this axis.
+
+    Args:
+        valid_from: Timestamp when the claim became true.
+        valid_until: Timestamp when the claim expired (None = still valid).
+        now: Current time reference (defaults to UTC now).
+
+    Returns:
+        1.0 if the claim is currently valid, else 0.0.
+    """
+    now = now or datetime.now(UTC)
+    if now < valid_from:
+        return 0.0
+    if valid_until is not None and now >= valid_until:
+        return 0.0
+    return 1.0
+
+
+def calculate_salience(
+    base_salience: float,
+    *,
+    valid_from: datetime,
+    now: datetime | None = None,
+    access_count: int = 0,
+    importance: float = 1.0,
+    memory_type: str = "semantic",
+) -> float:
+    """Compute current salience score for an AtomicClaim.
+
+    Salience captures how *prominent* a claim is in working memory —
+    separate from whether it is logically true (truth_validity).  It
+    decays with time using the same Ebbinghaus curve as legacy facts,
+    but is boosted by usage and dampened by low importance.
+
+    This is the only axis that the forgetting scheduler updates periodically.
+    Truth validity (supersession) and promotion weight (corroboration) are
+    updated on ingest events, not on a timer.
+
+    Args:
+        base_salience: Starting salience at ingest time (usually 1.0).
+        valid_from: Claim inception time — used as the "created at" anchor.
+        now: Current time reference (defaults to UTC now).
+        access_count: Number of times this claim has been retrieved.
+        importance: Importance hint from the source episode (0.0–1.0).
+        memory_type: One of "semantic", "procedural", "episodic".
+
+    Returns:
+        Salience in [0.0, 1.0].
+    """
+    now = now or datetime.now(UTC)
+    time_hours = (now - valid_from).total_seconds() / 3600.0
+    if time_hours <= 0:
+        return min(base_salience, 1.0)
+
+    stability = calculate_stability(
+        importance=importance,
+        access_count=access_count,
+        memory_type=memory_type,
+    )
+    if stability <= 0:
+        return 0.0
+
+    exponent = _TYPE_DECAY_EXPONENT.get(memory_type, _DEFAULT_DECAY_EXPONENT)
+    curve = float((1.0 + time_hours / (_POWER_LAW_FACTOR * stability)) ** (-exponent))
+    return float(min(base_salience * curve, 1.0))
+
+
+def calculate_promotion_weight(
+    current_weight: float,
+    *,
+    corroboration_count: int = 0,
+    contradiction_count: int = 0,
+    age_days: float = 0.0,
+) -> float:
+    """Compute how strongly a claim should be promoted in bundle ranking.
+
+    Promotion weight is a hysteresis-stabilized score that encodes:
+    - Corroboration bonus: confirmed by multiple independent episodes.
+    - Contradiction penalty: challenged by at least one conflicting claim.
+    - Stability bonus: long-lived claims without contradiction are more trusted.
+
+    Unlike salience (which decays continuously), promotion weight is only
+    updated when new corroborating or conflicting evidence arrives.
+
+    Args:
+        current_weight: Existing promotion weight (0.0–2.0 range).
+        corroboration_count: Number of independent episodes supporting this claim.
+        contradiction_count: Number of episodes contradicting this claim.
+        age_days: Days since the claim was last corroborated.
+
+    Returns:
+        Updated promotion weight (clamped to [0.0, 2.0]).
+    """
+    weight = current_weight
+
+    # Corroboration adds diminishing-returns bonus.
+    if corroboration_count > 0:
+        weight += 0.1 * math.log1p(corroboration_count)
+
+    # Contradiction subtracts linearly.
+    weight -= 0.2 * contradiction_count
+
+    # Stability bonus: every 30 days without contradiction adds a small boost.
+    if contradiction_count == 0 and age_days > 0:
+        stability_bonus = 0.05 * math.log1p(age_days / 30.0)
+        weight += stability_bonus
+
+    return float(max(0.0, min(weight, 2.0)))

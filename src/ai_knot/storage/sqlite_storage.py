@@ -121,6 +121,10 @@ class SQLiteStorage:
             conn.execute(_CREATE_SNAPSHOTS_TABLE)
             for stmt in _CREATE_INDEXES:
                 conn.execute(stmt)
+            # v2 query planes — idempotent
+            from ai_knot.migrations.v2_query_planes import apply_v2_migration
+
+            apply_v2_migration(conn)
         self._migrate_db()
 
     def _migrate_db(self) -> None:
@@ -564,3 +568,505 @@ class SQLiteStorage:
                 "DELETE FROM snapshots WHERE agent_id = ? AND name = ?",
                 (agent_id, name),
             )
+
+    # ------------------------------------------------------------------ #
+    # RawEpisodeStore (v2)
+    # ------------------------------------------------------------------ #
+
+    def save_episodes(self, agent_id: str, episodes: list[Any]) -> None:
+        """Upsert raw episodes."""
+        if not episodes:
+            return
+        rows = [
+            (
+                ep.id,
+                agent_id,
+                ep.session_id,
+                ep.turn_id,
+                ep.speaker,
+                ep.observed_at.isoformat(),
+                ep.session_date.isoformat() if ep.session_date else None,
+                ep.raw_text,
+                json.dumps(ep.source_meta, ensure_ascii=False),
+                ep.parent_episode_id,
+            )
+            for ep in episodes
+        ]
+        with self._conn() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO raw_episodes
+                   (id, agent_id, session_id, turn_id, speaker, observed_at,
+                    session_date, raw_text, source_meta, parent_episode_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                rows,
+            )
+
+    def load_episodes(self, agent_id: str, *, session_id: str | None = None) -> list[Any]:
+        """Load all episodes for agent, optionally filtered by session."""
+        with self._conn() as conn:
+            if session_id is not None:
+                rows = conn.execute(
+                    "SELECT id, agent_id, session_id, turn_id, speaker, observed_at, "
+                    "session_date, raw_text, source_meta, parent_episode_id "
+                    "FROM raw_episodes WHERE agent_id=? AND session_id=? ORDER BY observed_at",
+                    (agent_id, session_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, agent_id, session_id, turn_id, speaker, observed_at, "
+                    "session_date, raw_text, source_meta, parent_episode_id "
+                    "FROM raw_episodes WHERE agent_id=? ORDER BY observed_at",
+                    (agent_id,),
+                ).fetchall()
+        return [_row_to_episode(r) for r in rows]
+
+    def get_episode(self, agent_id: str, episode_id: str) -> Any:
+        """Retrieve a single episode by id."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT id, agent_id, session_id, turn_id, speaker, observed_at, "
+                "session_date, raw_text, source_meta, parent_episode_id "
+                "FROM raw_episodes WHERE agent_id=? AND id=?",
+                (agent_id, episode_id),
+            ).fetchone()
+        return _row_to_episode(row) if row else None
+
+    # ------------------------------------------------------------------ #
+    # ClaimStore (v2)
+    # ------------------------------------------------------------------ #
+
+    def save_claims(self, agent_id: str, claims: list[Any]) -> None:
+        """Upsert atomic claims."""
+        if not claims:
+            return
+        rows = [_claim_to_row(agent_id, c) for c in claims]
+        with self._conn() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO atomic_claims
+                   (id, agent_id, kind, subject, relation, value_text, value_tokens,
+                    qualifiers, polarity, event_time, observed_at, valid_from, valid_until,
+                    confidence, salience, source_episode_id, source_spans,
+                    materialization_version, materialized_at, slot_key, version, origin_agent_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                rows,
+            )
+
+    def load_claims(
+        self,
+        agent_id: str,
+        *,
+        ids: list[str] | None = None,
+        subjects: list[str] | None = None,
+        kinds: list[Any] | None = None,
+        active_only: bool = True,
+    ) -> list[Any]:
+        """Load claims with optional filters."""
+        conditions = ["agent_id = ?"]
+        params: list[Any] = [agent_id]
+        if active_only:
+            conditions.append("valid_until IS NULL")
+        if ids is not None:
+            placeholders = ",".join("?" * len(ids))
+            conditions.append(f"id IN ({placeholders})")
+            params.extend(ids)
+        if subjects is not None:
+            placeholders = ",".join("?" * len(subjects))
+            conditions.append(f"subject IN ({placeholders})")
+            params.extend(subjects)
+        if kinds is not None:
+            kind_vals = [k.value if hasattr(k, "value") else str(k) for k in kinds]
+            placeholders = ",".join("?" * len(kind_vals))
+            conditions.append(f"kind IN ({placeholders})")
+            params.extend(kind_vals)
+        where = " AND ".join(conditions)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, agent_id, kind, subject, relation, value_text, value_tokens, "
+                f"qualifiers, polarity, event_time, observed_at, valid_from, valid_until, "
+                f"confidence, salience, source_episode_id, source_spans, "
+                f"materialization_version, materialized_at, slot_key, version, origin_agent_id "
+                f"FROM atomic_claims WHERE {where} ORDER BY observed_at",
+                params,
+            ).fetchall()
+        return [_row_to_claim(r) for r in rows]
+
+    def iter_value_text(self, agent_id: str) -> list[tuple[str, str]]:
+        """Return [(claim_id, value_text)] for BM25 retrieval."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, value_text FROM atomic_claims WHERE agent_id=? AND valid_until IS NULL",
+                (agent_id,),
+            ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    def replace_claims_for_episodes(
+        self, agent_id: str, episode_ids: list[str], new_claims: list[Any]
+    ) -> None:
+        """Delete claims from these episodes and insert new ones."""
+        if not episode_ids:
+            return
+        placeholders = ",".join("?" * len(episode_ids))
+        with self._conn() as conn:
+            conn.execute(
+                f"DELETE FROM atomic_claims WHERE agent_id=? AND source_episode_id IN ({placeholders})",
+                [agent_id, *episode_ids],
+            )
+            if new_claims:
+                rows = [_claim_to_row(agent_id, c) for c in new_claims]
+                conn.executemany(
+                    """INSERT OR REPLACE INTO atomic_claims
+                       (id, agent_id, kind, subject, relation, value_text, value_tokens,
+                        qualifiers, polarity, event_time, observed_at, valid_from, valid_until,
+                        confidence, salience, source_episode_id, source_spans,
+                        materialization_version, materialized_at, slot_key, version, origin_agent_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    rows,
+                )
+
+    def delete_all_claims(self, agent_id: str) -> None:
+        """Remove all claims for an agent."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM atomic_claims WHERE agent_id=?", (agent_id,))
+
+    # ------------------------------------------------------------------ #
+    # BundleStore (v2)
+    # ------------------------------------------------------------------ #
+
+    def save_bundles(self, agent_id: str, bundles: list[Any], memberships: dict[str, list[str]]) -> None:
+        """Persist bundles and their member claim lists."""
+        if not bundles:
+            return
+        bundle_rows = [
+            (
+                b.id,
+                agent_id,
+                b.kind.value if hasattr(b.kind, "value") else str(b.kind),
+                b.topic,
+                b.bundle_score,
+                b.score_formula,
+                b.built_from_materialization_version,
+                b.built_at.isoformat(),
+            )
+            for b in bundles
+        ]
+        member_rows = [
+            (agent_id, bundle_id, claim_id, rank)
+            for bundle_id, claim_ids in memberships.items()
+            for rank, claim_id in enumerate(claim_ids)
+        ]
+        with self._conn() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO support_bundles
+                   (id, agent_id, kind, topic, bundle_score, score_formula,
+                    built_from_materialization_version, built_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                bundle_rows,
+            )
+            if member_rows:
+                conn.executemany(
+                    """INSERT OR REPLACE INTO bundle_members
+                       (agent_id, bundle_id, claim_id, member_rank)
+                       VALUES (?,?,?,?)""",
+                    member_rows,
+                )
+
+    def load_bundles_by_topic(
+        self,
+        agent_id: str,
+        topics: list[str],
+        kinds: list[Any] | None = None,
+    ) -> list[Any]:
+        """Load bundles matching any of the given topics."""
+        if not topics:
+            return []
+        conditions = ["agent_id = ?"]
+        params: list[Any] = [agent_id]
+        placeholders = ",".join("?" * len(topics))
+        conditions.append(f"topic IN ({placeholders})")
+        params.extend(topics)
+        if kinds is not None:
+            kind_vals = [k.value if hasattr(k, "value") else str(k) for k in kinds]
+            kp = ",".join("?" * len(kind_vals))
+            conditions.append(f"kind IN ({kp})")
+            params.extend(kind_vals)
+        where = " AND ".join(conditions)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, agent_id, kind, topic, bundle_score, score_formula, "
+                f"built_from_materialization_version, built_at "
+                f"FROM support_bundles WHERE {where}",
+                params,
+            ).fetchall()
+        return [_row_to_bundle(r) for r in rows]
+
+    def load_bundle_members(self, agent_id: str, bundle_ids: list[str]) -> dict[str, list[str]]:
+        """Return {bundle_id: [claim_id, ...]} for each requested bundle."""
+        if not bundle_ids:
+            return {}
+        placeholders = ",".join("?" * len(bundle_ids))
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT bundle_id, claim_id FROM bundle_members "
+                f"WHERE agent_id=? AND bundle_id IN ({placeholders}) ORDER BY bundle_id, member_rank",
+                [agent_id, *bundle_ids],
+            ).fetchall()
+        result: dict[str, list[str]] = {bid: [] for bid in bundle_ids}
+        for bundle_id, claim_id in rows:
+            result.setdefault(bundle_id, []).append(claim_id)
+        return result
+
+    def invalidate_by_keys(self, agent_id: str, keys: list[Any]) -> int:
+        """Delete bundles matching any dirty key; return count removed."""
+        from ai_knot.query_types import BundleKind
+
+        if not keys:
+            return 0
+        bundle_ids_to_delete: set[str] = set()
+        with self._conn() as conn:
+            for key in keys:
+                if key.subject and key.relation:
+                    topic = f"{key.subject}::{key.relation}"
+                    rows = conn.execute(
+                        "SELECT id FROM support_bundles WHERE agent_id=? AND topic=? "
+                        "AND kind IN (?,?)",
+                        (
+                            agent_id,
+                            topic,
+                            BundleKind.STATE_TIMELINE.value,
+                            BundleKind.RELATION_SUPPORT.value,
+                        ),
+                    ).fetchall()
+                    bundle_ids_to_delete.update(r[0] for r in rows)
+                elif key.subject:
+                    rows = conn.execute(
+                        "SELECT id FROM support_bundles WHERE agent_id=? AND topic=? "
+                        "AND kind IN (?,?)",
+                        (
+                            agent_id,
+                            key.subject,
+                            BundleKind.ENTITY_TOPIC.value,
+                            BundleKind.EVENT_NEIGHBORHOOD.value,
+                        ),
+                    ).fetchall()
+                    bundle_ids_to_delete.update(r[0] for r in rows)
+                elif key.bundle_kind and key.topic:
+                    kind_val = (
+                        key.bundle_kind.value
+                        if hasattr(key.bundle_kind, "value")
+                        else str(key.bundle_kind)
+                    )
+                    rows = conn.execute(
+                        "SELECT id FROM support_bundles WHERE agent_id=? AND kind=? AND topic=?",
+                        (agent_id, kind_val, key.topic),
+                    ).fetchall()
+                    bundle_ids_to_delete.update(r[0] for r in rows)
+
+            if bundle_ids_to_delete:
+                bp = ",".join("?" * len(bundle_ids_to_delete))
+                conn.execute(
+                    f"DELETE FROM bundle_members WHERE agent_id=? AND bundle_id IN ({bp})",
+                    [agent_id, *bundle_ids_to_delete],
+                )
+                conn.execute(
+                    f"DELETE FROM support_bundles WHERE agent_id=? AND id IN ({bp})",
+                    [agent_id, *bundle_ids_to_delete],
+                )
+        return len(bundle_ids_to_delete)
+
+    def clear_all_bundles(self, agent_id: str) -> None:
+        """Remove all bundles and memberships for an agent."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM bundle_members WHERE agent_id=?", (agent_id,))
+            conn.execute("DELETE FROM support_bundles WHERE agent_id=?", (agent_id,))
+
+    # ------------------------------------------------------------------ #
+    # MaterializationMetaStore (v2)
+    # ------------------------------------------------------------------ #
+
+    def load_materialization_meta(self, agent_id: str) -> dict[str, Any]:
+        """Return metadata dict; empty dict if no record exists."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT schema_version, materialization_version, last_rebuild_at, "
+                "dirty_keys_json, rebuild_status FROM materialization_meta WHERE agent_id=?",
+                (agent_id,),
+            ).fetchone()
+        if row is None:
+            return {}
+        return {
+            "schema_version": row[0],
+            "materialization_version": row[1],
+            "last_rebuild_at": row[2],
+            "dirty_keys_json": row[3],
+            "rebuild_status": row[4],
+        }
+
+    def save_materialization_meta(
+        self,
+        agent_id: str,
+        *,
+        schema_version: int,
+        materialization_version: int,
+        last_rebuild_at: datetime | None = None,
+        dirty_keys_json: str = "[]",
+        rebuild_status: str = "ready",
+    ) -> None:
+        """Upsert materialization metadata for an agent."""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO materialization_meta
+                   (agent_id, schema_version, materialization_version,
+                    last_rebuild_at, dirty_keys_json, rebuild_status)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    agent_id,
+                    schema_version,
+                    materialization_version,
+                    last_rebuild_at.isoformat() if last_rebuild_at else None,
+                    dirty_keys_json,
+                    rebuild_status,
+                ),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Module-level row conversion helpers (no self reference)
+# ---------------------------------------------------------------------------
+
+
+def _row_to_episode(row: tuple[Any, ...]) -> Any:
+    from ai_knot.query_types import RawEpisode
+    from ai_knot.storage.base import parse_datetime as _pd
+
+    (
+        ep_id,
+        agent_id,
+        session_id,
+        turn_id,
+        speaker,
+        observed_at,
+        session_date,
+        raw_text,
+        source_meta_json,
+        parent_episode_id,
+    ) = row
+    return RawEpisode(
+        id=ep_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        turn_id=turn_id,
+        speaker=speaker,
+        observed_at=_pd(observed_at),
+        session_date=_pd(session_date) if session_date else None,
+        raw_text=raw_text,
+        source_meta=json.loads(source_meta_json),
+        parent_episode_id=parent_episode_id,
+    )
+
+
+def _claim_to_row(agent_id: str, c: Any) -> tuple[Any, ...]:
+    return (
+        c.id,
+        agent_id,
+        c.kind.value if hasattr(c.kind, "value") else str(c.kind),
+        c.subject,
+        c.relation,
+        c.value_text,
+        json.dumps(list(c.value_tokens), ensure_ascii=False),
+        json.dumps(c.qualifiers, ensure_ascii=False),
+        c.polarity,
+        c.event_time.isoformat() if c.event_time else None,
+        c.observed_at.isoformat(),
+        c.valid_from.isoformat(),
+        c.valid_until.isoformat() if c.valid_until else None,
+        c.confidence,
+        c.salience,
+        c.source_episode_id,
+        json.dumps([list(s) for s in c.source_spans], ensure_ascii=False),
+        c.materialization_version,
+        c.materialized_at.isoformat(),
+        c.slot_key,
+        c.version,
+        c.origin_agent_id,
+    )
+
+
+def _row_to_claim(row: tuple[Any, ...]) -> Any:
+    from ai_knot.query_types import AtomicClaim, ClaimKind
+    from ai_knot.storage.base import parse_datetime as _pd
+
+    (
+        claim_id,
+        agent_id,
+        kind_str,
+        subject,
+        relation,
+        value_text,
+        value_tokens_json,
+        qualifiers_json,
+        polarity,
+        event_time_str,
+        observed_at_str,
+        valid_from_str,
+        valid_until_str,
+        confidence,
+        salience,
+        source_episode_id,
+        source_spans_json,
+        materialization_version,
+        materialized_at_str,
+        slot_key,
+        version,
+        origin_agent_id,
+    ) = row
+    return AtomicClaim(
+        id=claim_id,
+        agent_id=agent_id,
+        kind=ClaimKind(kind_str),
+        subject=subject,
+        relation=relation,
+        value_text=value_text,
+        value_tokens=tuple(json.loads(value_tokens_json)),
+        qualifiers=json.loads(qualifiers_json),
+        polarity=polarity,
+        event_time=_pd(event_time_str) if event_time_str else None,
+        observed_at=_pd(observed_at_str),
+        valid_from=_pd(valid_from_str),
+        valid_until=_pd(valid_until_str) if valid_until_str else None,
+        confidence=confidence,
+        salience=salience,
+        source_episode_id=source_episode_id,
+        source_spans=tuple(tuple(s) for s in json.loads(source_spans_json)),
+        materialization_version=materialization_version,
+        materialized_at=_pd(materialized_at_str),
+        slot_key=slot_key,
+        version=version,
+        origin_agent_id=origin_agent_id,
+    )
+
+
+def _row_to_bundle(row: tuple[Any, ...]) -> Any:
+    from ai_knot.query_types import BundleKind, SupportBundle
+    from ai_knot.storage.base import parse_datetime as _pd
+
+    (
+        bundle_id,
+        agent_id,
+        kind_str,
+        topic,
+        bundle_score,
+        score_formula,
+        built_from_version,
+        built_at_str,
+    ) = row
+    return SupportBundle(
+        id=bundle_id,
+        agent_id=agent_id,
+        kind=BundleKind(kind_str),
+        topic=topic,
+        member_claim_ids=(),  # loaded separately
+        score_formula=score_formula,
+        bundle_score=bundle_score,
+        built_from_materialization_version=built_from_version,
+        built_at=_pd(built_at_str),
+    )

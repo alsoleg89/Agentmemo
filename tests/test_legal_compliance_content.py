@@ -20,6 +20,9 @@ SKIP_DIR_NAMES = {
     ".ruff_cache",
     ".venv",
     "__pycache__",
+    "memvid",  # external library — frequency dictionaries contain all English words
+    "data",  # benchmark datasets (LoCoMo, etc.) — third-party content
+    "research",  # analysis/documentation files — may quote third-party benchmark data
 }
 SKIP_FILE_NAMES = {"compliance_allowlist.txt", "test_legal_compliance_content.py"}
 TEXT_EXTENSIONS = {".py", ".md", ".txt", ".json", ".yaml", ".yml"}

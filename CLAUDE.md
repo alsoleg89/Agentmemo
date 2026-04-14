@@ -52,3 +52,51 @@ git log --format="%B" | grep "https://claude\|session_"
 ```
 
 **Order matters:** format → lint → types → tests. Don't skip format — CI will fail.
+
+## Benchmark commands
+
+### LOCOMO benchmark (aiknotbench — TypeScript)
+
+```bash
+# Full run (all 10 conversations, 233 questions, dated-learn mode)
+cd aiknotbench && npx tsx src/index.ts run -r v1 --ingest-mode dated-learn --top-k 60
+
+# Single category (e.g. Cat 2 = multi-hop)
+npx tsx src/index.ts run -r v1 --ingest-mode dated-learn --top-k 60 --types 2
+
+# Quick smoke test (1 conversation, 5 facts)
+npx tsx src/index.ts run -r smoke --ingest-mode dated-learn --top-k 5 --limit 1
+
+# List previous runs
+npx tsx src/index.ts list
+```
+
+### Python benchmark (S1–S9 + LOCOMO)
+
+```bash
+# All default scenarios (S1–S9 + LOCOMO)
+.venv/bin/python -m tests.eval.benchmark.runner
+
+# Specific scenarios
+.venv/bin/python -m tests.eval.benchmark.runner --scenarios s1,s4
+
+# Offline (no Ollama judge)
+.venv/bin/python -m tests.eval.benchmark.runner --mock-judge
+```
+
+### Multi-agent scenarios (S8-MA through S26)
+
+```bash
+# All MA scenarios
+.venv/bin/python -m tests.eval.benchmark.runner --multi-agent
+
+# By category
+.venv/bin/python -m tests.eval.benchmark.runner --multi-agent --ma-category protocol   # S10,S11,S13,S17,S20,S25
+.venv/bin/python -m tests.eval.benchmark.runner --multi-agent --ma-category retrieval  # S8-MA,S9-MA,S12,S14-S16,S18,S19,S21-S24,S26
+
+# Specific MA scenarios
+.venv/bin/python -m tests.eval.benchmark.runner --multi-agent --scenarios s10,s11
+
+# With specific storage backend
+.venv/bin/python -m tests.eval.benchmark.runner --multi-agent --ma-storage sqlite
+```

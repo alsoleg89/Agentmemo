@@ -195,7 +195,12 @@ def tool_learn(
         JSON summary with ``{"stored": n, "ids": [...]}`` or an error message.
     """
     effective_provider = provider or os.environ.get("AI_KNOT_PROVIDER")
-    effective_key = api_key or os.environ.get("AI_KNOT_API_KEY")
+    effective_key = (
+        api_key
+        or os.environ.get("AI_KNOT_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+    )
     effective_model = model or os.environ.get("AI_KNOT_MODEL")
 
     turns = [
@@ -276,3 +281,234 @@ def tool_restore(kb: KnowledgeBase, name: str) -> str:
         return f"Snapshots not supported by this storage backend: {exc}"
     except KeyError:
         return f"Snapshot {name!r} not found."
+
+
+# ---------------------------------------------------------------------------
+# New-gen Track A tools
+# ---------------------------------------------------------------------------
+
+
+def tool_ingest_episode(
+    kb: KnowledgeBase,
+    *,
+    session_id: str,
+    turn_id: str,
+    speaker: str = "user",
+    observed_at: str | None = None,
+    raw_text: str,
+    session_date: str | None = None,
+    source_meta: dict[str, object] | None = None,
+    parent_episode_id: str | None = None,
+    materialize: bool = True,
+) -> str:
+    """Ingest a single raw episode into the knowledge base.
+
+    Stores the turn as a ``RawEpisode`` and deterministically materializes
+    it into ``AtomicClaim``s. Does NOT call the LLM.
+
+    Args:
+        kb: The knowledge base instance.
+        session_id: Session identifier (groups turns into conversations).
+        turn_id: Unique turn identifier within the session.
+        speaker: Speaker role, e.g. "user" or "assistant".
+        observed_at: ISO datetime string when the turn was observed. Defaults to now.
+        raw_text: The raw conversation text for this turn.
+        session_date: Optional ISO date for session-level temporal anchor.
+        source_meta: Optional metadata dict (e.g. dataset name, LLM trace).
+        parent_episode_id: Optional parent episode for session enveloping.
+        materialize: If True (default), materialize into AtomicClaims immediately.
+
+    Returns:
+        JSON string with the episode ID.
+    """
+    from datetime import UTC, datetime
+
+    obs = datetime.fromisoformat(observed_at) if observed_at else datetime.now(UTC)
+    sdate = datetime.fromisoformat(session_date) if session_date else None
+
+    try:
+        episode = kb.ingest_episode(
+            session_id=session_id,
+            turn_id=turn_id,
+            speaker=speaker,
+            observed_at=obs,
+            raw_text=raw_text,
+            session_date=sdate,
+            source_meta=source_meta or {},
+            parent_episode_id=parent_episode_id,
+            materialize=materialize,
+        )
+        return json.dumps({"episode_id": episode.id, "session_id": session_id}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def tool_query(
+    kb: KnowledgeBase,
+    question: str,
+    *,
+    top_k: int = 60,
+    render: str = "structured",
+) -> str:
+    """Contract-first query over memory. Returns the answer text.
+
+    Uses the full contract-first pipeline: analyze_query → retrieve_bundles
+    → expand_claims → build_evidence_profile → choose_strategy → operator.
+
+    Args:
+        kb: The knowledge base instance.
+        question: Natural-language question.
+        top_k: Maximum bundles to retrieve (default 60).
+        render: "structured" (deterministic) or "narrative" (LLM fallback).
+
+    Returns:
+        Answer text string.
+    """
+    try:
+        answer = kb.query(question, top_k=top_k, render=render)
+        return answer.text
+    except RuntimeError:
+        # Storage does not support v2 planes — fall back to legacy recall.
+        return kb.recall(question, top_k=min(top_k, 10))
+
+
+def tool_query_json(
+    kb: KnowledgeBase,
+    question: str,
+    *,
+    top_k: int = 60,
+    render: str = "structured",
+) -> str:
+    """Contract-first query returning full QueryAnswer as JSON.
+
+    Returns the complete structured payload: text, items (with confidence
+    and provenance), and trace (strategy, evidence profile, latency).
+
+    Args:
+        kb: The knowledge base instance.
+        question: Natural-language question.
+        top_k: Maximum bundles to retrieve.
+        render: "structured" or "narrative".
+
+    Returns:
+        JSON string of QueryAnswer.
+    """
+    try:
+        return json.dumps(kb.query_json(question, top_k=top_k, render=render), ensure_ascii=False)
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def tool_rebuild_materialized(
+    kb: KnowledgeBase,
+    *,
+    scope: str = "all",
+    force: bool = False,
+) -> str:
+    """Rebuild the atomic_claims and support_bundles planes from raw_episodes.
+
+    This is a deterministic, idempotent operation. It does NOT call the LLM.
+    Use after schema upgrades or when materialization_version is stale.
+
+    Args:
+        kb: The knowledge base instance.
+        scope: "all" (default) or a specific materialization scope.
+        force: Force rebuild even if materialization_version is current.
+
+    Returns:
+        Rebuild report as JSON string.
+    """
+    try:
+        report = kb.rebuild_materialized(scope=scope, force=force)
+        return json.dumps(report, ensure_ascii=False)
+    except AttributeError:
+        return json.dumps({"error": "rebuild_materialized not available on this storage backend"})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def tool_stats_query(kb: KnowledgeBase) -> str:
+    """Return statistics about the v2 query planes.
+
+    Includes counts of raw_episodes, atomic_claims, support_bundles, and
+    the current materialization_version.
+
+    Args:
+        kb: The knowledge base instance.
+
+    Returns:
+        JSON object with plane counts and materialization metadata.
+    """
+    storage = kb._storage
+    agent_id = kb._agent_id
+
+    result: dict[str, object] = {}
+
+    # Counts from v2 planes (graceful degradation if not supported).
+    if hasattr(storage, "load_episodes"):
+        try:
+            episodes = storage.load_episodes(agent_id)
+            result["n_raw_episodes"] = len(episodes)
+        except Exception as exc:
+            result["n_raw_episodes"] = f"error: {exc}"
+
+    if hasattr(storage, "load_claims"):
+        try:
+            claims = storage.load_claims(agent_id, active_only=False)
+            result["n_atomic_claims"] = len(claims)
+            active = sum(1 for c in claims if c.valid_until is None)
+            result["n_active_claims"] = active
+        except Exception as exc:
+            result["n_atomic_claims"] = f"error: {exc}"
+
+    if hasattr(storage, "load_materialization_meta"):
+        try:
+            meta = storage.load_materialization_meta(agent_id)
+            result["materialization_version"] = meta.get("materialization_version", 0)
+            result["schema_version"] = meta.get("schema_version", 1)
+            result["last_rebuild_at"] = meta.get("last_rebuild_at")
+            result["rebuild_status"] = meta.get("rebuild_status", "ready")
+        except Exception as exc:
+            result["materialization_meta"] = f"error: {exc}"
+
+    # Legacy stats merged in.
+    result["legacy"] = kb.stats()
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def tool_explain_query(
+    kb: KnowledgeBase,
+    question: str,
+    *,
+    top_k: int = 60,
+) -> str:
+    """Return only the AnswerTrace for a question without executing the full render.
+
+    Useful for debugging: shows which strategy was chosen, how many bundles
+    and claims were found, and what the evidence profile looks like.
+
+    Args:
+        kb: The knowledge base instance.
+        question: Natural-language question to explain.
+        top_k: Maximum bundles to retrieve.
+
+    Returns:
+        JSON string of AnswerTrace.
+    """
+    try:
+        trace = kb.explain_query(question, top_k=top_k)
+        # Serialize the trace dataclass.
+        import dataclasses
+
+        def _to_json(obj: object) -> object:
+            if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+                return {k: _to_json(v) for k, v in dataclasses.asdict(obj).items()}
+            if isinstance(obj, tuple):
+                return [_to_json(x) for x in obj]
+            if isinstance(obj, (list,)):
+                return [_to_json(x) for x in obj]
+            return obj
+
+        return json.dumps(_to_json(trace), ensure_ascii=False, default=str, indent=2)
+    except RuntimeError as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)

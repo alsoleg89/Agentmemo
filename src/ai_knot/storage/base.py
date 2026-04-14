@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ai_knot.types import Fact, SlotDelta
+
+if TYPE_CHECKING:
+    from ai_knot.query_types import (  # noqa: E501
+        AtomicClaim,
+        BundleKind,
+        ClaimKind,
+        DirtyKey,
+        RawEpisode,
+        SupportBundle,
+    )
 
 
 def parse_datetime(value: str) -> datetime:
@@ -138,4 +148,134 @@ class SnapshotCapable(Protocol):
 
     def delete_snapshot(self, agent_id: str, name: str) -> None:
         """Delete a named snapshot. No-op if the snapshot does not exist."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# v2 query-plane storage protocols (Track A)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class RawEpisodeStore(Protocol):
+    """Protocol for raw episode persistence (source-of-truth plane)."""
+
+    def save_episodes(self, agent_id: str, episodes: list[RawEpisode]) -> None:
+        """Persist a batch of raw episodes (upsert by id)."""
+        ...
+
+    def load_episodes(
+        self,
+        agent_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> list[RawEpisode]:
+        """Load all episodes for agent, optionally filtered by session."""
+        ...
+
+    def get_episode(self, agent_id: str, episode_id: str) -> RawEpisode | None:
+        """Retrieve a single episode by id."""
+        ...
+
+
+@runtime_checkable
+class ClaimStore(Protocol):
+    """Protocol for atomic claim persistence (materialized plane)."""
+
+    def save_claims(self, agent_id: str, claims: list[AtomicClaim]) -> None:
+        """Persist a batch of claims (upsert by id)."""
+        ...
+
+    def load_claims(
+        self,
+        agent_id: str,
+        *,
+        ids: list[str] | None = None,
+        subjects: list[str] | None = None,
+        kinds: list[ClaimKind] | None = None,
+        active_only: bool = True,
+    ) -> list[AtomicClaim]:
+        """Load claims with optional filters."""
+        ...
+
+    def iter_value_text(self, agent_id: str) -> Iterable[tuple[str, str]]:
+        """Yield (claim_id, value_text) pairs for BM25 retrieval."""
+        ...
+
+    def replace_claims_for_episodes(
+        self,
+        agent_id: str,
+        episode_ids: list[str],
+        new_claims: list[AtomicClaim],
+    ) -> None:
+        """Delete all claims for these episode_ids and insert new_claims."""
+        ...
+
+    def delete_all_claims(self, agent_id: str) -> None:
+        """Remove all claims for an agent (used by rebuild)."""
+        ...
+
+
+@runtime_checkable
+class BundleStore(Protocol):
+    """Protocol for support bundle persistence (coarse retrieval plane)."""
+
+    def save_bundles(
+        self,
+        agent_id: str,
+        bundles: list[SupportBundle],
+        memberships: dict[str, list[str]],
+    ) -> None:
+        """Persist bundles and their member claim lists."""
+        ...
+
+    def load_bundles_by_topic(
+        self,
+        agent_id: str,
+        topics: list[str],
+        kinds: list[BundleKind] | None = None,
+    ) -> list[SupportBundle]:
+        """Load bundles matching any of the given topics (and optionally kinds)."""
+        ...
+
+    def load_bundle_members(
+        self,
+        agent_id: str,
+        bundle_ids: list[str],
+    ) -> dict[str, list[str]]:
+        """Return {bundle_id: [claim_id, ...]} for each requested bundle."""
+        ...
+
+    def invalidate_by_keys(
+        self,
+        agent_id: str,
+        keys: list[DirtyKey],
+    ) -> int:
+        """Delete bundles matching any dirty key; return count removed."""
+        ...
+
+    def clear_all_bundles(self, agent_id: str) -> None:
+        """Remove all bundles for an agent (used by rebuild)."""
+        ...
+
+
+@runtime_checkable
+class MaterializationMetaStore(Protocol):
+    """Protocol for materialization metadata persistence."""
+
+    def load_materialization_meta(self, agent_id: str) -> dict[str, object]:
+        """Return metadata dict; empty dict if no record exists."""
+        ...
+
+    def save_materialization_meta(
+        self,
+        agent_id: str,
+        *,
+        schema_version: int,
+        materialization_version: int,
+        last_rebuild_at: datetime | None = None,
+        dirty_keys_json: str = "[]",
+        rebuild_status: str = "ready",
+    ) -> None:
+        """Upsert materialization metadata for an agent."""
         ...

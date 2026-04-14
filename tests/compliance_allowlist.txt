@@ -1,3 +1,8 @@
 # One substring per line.
 # Lines starting with "#" are ignored.
 # Add only deliberate, reviewed exceptions here.
+
+# tests/test_knowledge.py — LoCoMo benchmark fixture data used in retrieval tests.
+# Reviewed: these strings are required for ranking regression tests on LoCoMo-derived
+# test data and are not first-party content.
+f2 = kb.add("caroline attended the lgbtq+ pride parade downtown")

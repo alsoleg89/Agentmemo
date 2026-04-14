@@ -5,6 +5,7 @@ import {
   resolveModel,
 } from "./models.js";
 import { runBenchmark, listRuns } from "./runner.js";
+import type { IngestMode, QueryMode } from "./aiknot.js";
 
 // ---- CLI arg parsing --------------------------------------------------------
 
@@ -14,9 +15,13 @@ export interface RunArgs {
   judgeModel: string;
   answerModel: string;
   limit?: number;
+  convs?: number[];
   sample?: number;
   types?: number[];
   topK: number;
+  maxTurns?: number;
+  ingestMode: IngestMode;
+  queryMode: QueryMode;
   aiKnotEnv: Record<string, string>;
   force: boolean;
 }
@@ -41,9 +46,13 @@ function parseRunArgs(args: string[]): RunArgs {
   let judgeModel = DEFAULT_JUDGE_MODEL;
   let answerModel = DEFAULT_ANSWER_MODEL;
   let limit: number | undefined;
+  let convs: number[] | undefined;
   let sample: number | undefined;
   let types: number[] | undefined;
-  let topK = 5;
+  let topK = 60;
+  let maxTurns: number | undefined;
+  let ingestMode: IngestMode = "raw";
+  let queryMode: QueryMode = "legacy_recall";
   const aiKnotEnv: Record<string, string> = {};
   let force = false;
 
@@ -63,6 +72,9 @@ function parseRunArgs(args: string[]): RunArgs {
     } else if (a === "--limit" && next) {
       limit = parseInt(next, 10);
       i++;
+    } else if (a === "--convs" && next) {
+      convs = next.split(",").map((s) => parseInt(s.trim(), 10));
+      i++;
     } else if (a === "--sample" && next) {
       sample = parseInt(next, 10);
       i++;
@@ -71,6 +83,25 @@ function parseRunArgs(args: string[]): RunArgs {
       i++;
     } else if (a === "--top-k" && next) {
       topK = parseInt(next, 10);
+      i++;
+    } else if (a === "--max-turns" && next) {
+      maxTurns = parseInt(next, 10);
+      i++;
+    } else if (a === "--ingest-mode" && next) {
+      if (next === "raw" || next === "session" || next === "dated" || next === "learn" || next === "dated-learn" || next === "raw-episodes") {
+        ingestMode = next;
+      } else {
+        console.error(`Error: --ingest-mode must be raw|session|dated|learn|dated-learn|raw-episodes (got "${next}")`);
+        process.exit(1);
+      }
+      i++;
+    } else if (a === "--query-mode" && next) {
+      if (next === "legacy_recall" || next === "target_query") {
+        queryMode = next;
+      } else {
+        console.error(`Error: --query-mode must be legacy_recall|target_query (got "${next}")`);
+        process.exit(1);
+      }
       i++;
     } else if (a === "--knot-env" && next) {
       // Format: KEY=VALUE
@@ -89,7 +120,7 @@ function parseRunArgs(args: string[]): RunArgs {
     process.exit(1);
   }
 
-  return { command: "run", runId, judgeModel, answerModel, limit, sample, types, topK, aiKnotEnv, force };
+  return { command: "run", runId, judgeModel, answerModel, limit, convs, sample, types, topK, maxTurns, ingestMode, queryMode, aiKnotEnv, force };
 }
 
 function parseListArgs(args: string[]): ListArgs {
@@ -125,14 +156,16 @@ Run options:
   --limit <n>          Limit to first N conversations
   --sample <n>         Max QA pairs per conversation
   --types <1,2,3,4>    Question categories to evaluate (default: all)
-  --top-k <n>          Facts to recall per query (default: 5)
+  --top-k <n>          Facts to recall per query (default: 60)
+  --ingest-mode <m>    Ingestion mode: raw|session|dated|learn|dated-learn|raw-episodes (default: raw)
+  --query-mode <m>     Query mode: legacy_recall|target_query (default: legacy_recall)
   --knot-env K=V       Pass env var to ai-knot-mcp (repeatable)
   --force              Delete existing run data and start fresh
 
 Examples:
   bun run src/index.ts run -r quick --limit 2 --types 1,2
   bun run src/index.ts run -r full --types 1,2,3,4
-  bun run src/index.ts run -r tuned --top-k 10 --knot-env AI_KNOT_RRF_WEIGHTS=8,2,2,1,1,0.5
+  bun run src/index.ts run -r tuned --top-k 10 --knot-env AI_KNOT_RRF_WEIGHTS=5,3,2,0,0,0
   bun run src/index.ts list -l 5
 `);
 }
@@ -178,9 +211,11 @@ async function main(): Promise<void> {
     judgeModel: judgeModelName,
     answerModel: answerModelName,
     limit,
+    convs,
     sample,
     types,
     topK,
+    maxTurns,
     aiKnotEnv,
     force,
   } = parsed;
@@ -194,7 +229,11 @@ async function main(): Promise<void> {
     aiKnotCommand: config.aiKnotCommand,
     aiKnotEnv,
     topK,
+    maxTurns,
+    ingestMode: parsed.ingestMode,
+    queryMode: parsed.queryMode,
     limit,
+    convs,
     sample,
     types,
     force,

@@ -27,16 +27,22 @@ from typing import Any
 from ai_knot._mcp_tools import (
     tool_add,
     tool_capabilities,
+    tool_explain_query,
     tool_forget,
     tool_health,
+    tool_ingest_episode,
     tool_learn,
     tool_list_facts,
     tool_list_snapshots,
+    tool_query,
+    tool_query_json,
+    tool_rebuild_materialized,
     tool_recall,
     tool_recall_json,
     tool_restore,
     tool_snapshot,
     tool_stats,
+    tool_stats_query,
 )
 from ai_knot.knowledge import KnowledgeBase
 from ai_knot.storage import create_storage
@@ -63,8 +69,12 @@ def _build_kb() -> KnowledgeBase:
     - ``AI_KNOT_RRF_WEIGHTS``       — comma-separated RRF weights (6 floats)
     - ``AI_KNOT_EXPANSION_WEIGHT``  — float, LLM expansion blend weight
     - ``AI_KNOT_EPISODIC_TTL``      — float, episodic TTL in hours
-    - ``AI_KNOT_EMBED_URL``         — Ollama base URL for embeddings
+    - ``AI_KNOT_EMBED_URL``         — base URL for the embedding endpoint
+                                     (default: http://localhost:11434 for Ollama;
+                                      use https://api.openai.com for OpenAI)
     - ``AI_KNOT_EMBED_MODEL``       — embedding model (default: nomic-embed-text)
+    - ``AI_KNOT_EMBED_API_KEY``     — API key for the embedding endpoint
+                                     (falls back to OPENAI_API_KEY; omit for Ollama)
 
     Returns:
         A configured KnowledgeBase instance.
@@ -77,9 +87,14 @@ def _build_kb() -> KnowledgeBase:
     dsn = db_path or os.path.join(data_dir, "ai_knot.db") if backend == "sqlite" else None
     storage = create_storage(backend, base_dir=data_dir, dsn=dsn)
 
-    llm_recall = os.environ.get("AI_KNOT_LLM_RECALL", "") in ("1", "true", "yes")
+    _raw_llm = os.environ.get("AI_KNOT_LLM_RECALL")
+    llm_recall: bool | None = _raw_llm in ("1", "true", "yes") if _raw_llm is not None else None
     provider = os.environ.get("AI_KNOT_PROVIDER")
-    api_key = os.environ.get("AI_KNOT_API_KEY")
+    api_key = (
+        os.environ.get("AI_KNOT_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("ANTHROPIC_API_KEY")
+    )
     model = os.environ.get("AI_KNOT_MODEL")
 
     raw_rrf = os.environ.get("AI_KNOT_RRF_WEIGHTS")
@@ -93,6 +108,7 @@ def _build_kb() -> KnowledgeBase:
 
     embed_url = os.environ.get("AI_KNOT_EMBED_URL", "http://localhost:11434")
     embed_model = os.environ.get("AI_KNOT_EMBED_MODEL", "nomic-embed-text")
+    embed_api_key = os.environ.get("AI_KNOT_EMBED_API_KEY") or os.environ.get("OPENAI_API_KEY")
 
     return KnowledgeBase(
         agent_id=agent_id,
@@ -106,6 +122,7 @@ def _build_kb() -> KnowledgeBase:
         episodic_ttl_hours=episodic_ttl_hours,
         embed_url=embed_url,
         embed_model=embed_model,
+        embed_api_key=embed_api_key,
     )
 
 
@@ -250,6 +267,106 @@ def _make_server(kb: KnowledgeBase) -> Any:
     def capabilities() -> str:
         """Return the list of available tools as a JSON array."""
         return tool_capabilities()
+
+    @app.tool()
+    def ingest_episode(
+        session_id: str,
+        turn_id: str,
+        raw_text: str,
+        speaker: str = "user",
+        observed_at: str | None = None,
+        session_date: str | None = None,
+        source_meta: dict[str, object] | None = None,
+        parent_episode_id: str | None = None,
+        materialize: bool = True,
+    ) -> str:
+        """Ingest a single raw conversation turn into memory.
+
+        Stores as RawEpisode and deterministically extracts AtomicClaims.
+        Does NOT call the LLM. Use this for batch ingest from raw conversations.
+
+        Args:
+            session_id: Session identifier (groups turns).
+            turn_id: Unique turn ID within the session.
+            raw_text: The raw conversation text.
+            speaker: Speaker role ("user" or "assistant").
+            observed_at: ISO datetime string (defaults to now).
+            session_date: ISO date for session-level temporal anchor.
+            source_meta: Optional metadata dict.
+            parent_episode_id: Optional parent episode ID.
+            materialize: If True, extract AtomicClaims immediately.
+        """
+        return tool_ingest_episode(
+            kb,
+            session_id=session_id,
+            turn_id=turn_id,
+            speaker=speaker,
+            observed_at=observed_at,
+            raw_text=raw_text,
+            session_date=session_date,
+            source_meta=source_meta,
+            parent_episode_id=parent_episode_id,
+            materialize=materialize,
+        )
+
+    @app.tool()
+    def query(question: str, top_k: int = 60, render: str = "structured") -> str:
+        """Contract-first query over memory. Returns answer text.
+
+        Uses the full pipeline: analyze_query → retrieve_bundles → expand_claims
+        → build_evidence_profile → choose_strategy → operator.
+
+        Args:
+            question: Natural-language question to answer.
+            top_k: Maximum support bundles to retrieve.
+            render: "structured" (deterministic) or "narrative" (LLM fallback).
+        """
+        return tool_query(kb, question, top_k=top_k, render=render)
+
+    @app.tool()
+    def query_json(question: str, top_k: int = 60, render: str = "structured") -> str:
+        """Contract-first query returning full QueryAnswer as JSON.
+
+        Returns structured payload: text, items (with confidence and provenance),
+        and trace (strategy, evidence profile, latency).
+
+        Args:
+            question: Natural-language question.
+            top_k: Maximum bundles to retrieve.
+            render: "structured" or "narrative".
+        """
+        return tool_query_json(kb, question, top_k=top_k, render=render)
+
+    @app.tool()
+    def rebuild_materialized(scope: str = "all", force: bool = False) -> str:
+        """Rebuild atomic_claims and support_bundles from raw_episodes.
+
+        Deterministic and idempotent — does not call the LLM. Use after
+        schema upgrades or when materialization_version is stale.
+
+        Args:
+            scope: "all" (default) or a specific materialization scope.
+            force: Force rebuild even if version is current.
+        """
+        return tool_rebuild_materialized(kb, scope=scope, force=force)
+
+    @app.tool()
+    def stats_query() -> str:
+        """Return v2 query plane statistics (episodes, claims, bundles, meta)."""
+        return tool_stats_query(kb)
+
+    @app.tool()
+    def explain_query(question: str, top_k: int = 60) -> str:
+        """Return the AnswerTrace for a question without rendering the answer.
+
+        Shows which strategy was chosen, evidence profile, bundle/claim counts,
+        and decision notes. Useful for debugging query routing.
+
+        Args:
+            question: Question to explain.
+            top_k: Maximum bundles to retrieve.
+        """
+        return tool_explain_query(kb, question, top_k=top_k)
 
     return app
 

@@ -9,7 +9,10 @@ import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from ai_knot.query_types import QueryAnswer, RebuildReport
 
 import ai_knot._spreading_activation as _ddsa
 from ai_knot._bm25 import _rrf_fuse
@@ -24,6 +27,7 @@ from ai_knot.providers import LLMProvider, create_provider
 from ai_knot.query_expander import LLMQueryExpander
 from ai_knot.retriever import DenseRetriever, HybridRetriever, TFIDFRetriever
 from ai_knot.storage.base import (
+    MaterializationMetaStore,
     SnapshotCapable,
     StorageBackend,
 )
@@ -1313,6 +1317,320 @@ class KnowledgeBase(_LearningMixin):
         removed = [f for f in facts_a if f.id not in ids_b]
         added = [f for f in facts_b if f.id not in ids_a]
         return SnapshotDiff(snapshot_a=a, snapshot_b=b, added=added, removed=removed)
+
+    # ------------------------------------------------------------------ #
+    # v2 query-plane public API (Track A)
+    # ------------------------------------------------------------------ #
+
+    def ingest_episode(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        speaker: str,
+        observed_at: datetime,
+        raw_text: str,
+        session_date: datetime | None = None,
+        source_meta: dict[str, Any] | None = None,
+        parent_episode_id: str | None = None,
+        materialize: bool = True,
+    ) -> Any:
+        """Ingest one raw conversation turn and optionally materialize claims.
+
+        Args:
+            session_id:         Identifier for the conversation session.
+            turn_id:            Identifier for this turn within the session.
+            speaker:            "user" or "assistant" (or any string).
+            observed_at:        When this turn was observed (UTC).
+            raw_text:           The verbatim turn text.
+            session_date:       Calendar date of the session (for temporal claims).
+            source_meta:        Arbitrary JSON-serializable metadata.
+            parent_episode_id:  Parent episode for session-envelope grouping.
+            materialize:        If True, run deterministic materializer immediately.
+
+        Returns:
+            The created RawEpisode.
+        """
+        from ai_knot.materialization import dirty_keys_for_claims, materialize_episode
+        from ai_knot.query_types import RawEpisode, make_episode_id
+
+        ep_id = make_episode_id(self._agent_id, session_id, turn_id)
+        episode = RawEpisode(
+            id=ep_id,
+            agent_id=self._agent_id,
+            session_id=session_id,
+            turn_id=turn_id,
+            speaker=speaker,
+            observed_at=observed_at,
+            raw_text=raw_text,
+            session_date=session_date,
+            source_meta=source_meta or {},
+            parent_episode_id=parent_episode_id,
+        )
+
+        if not hasattr(self._storage, "save_episodes"):
+            raise TypeError(
+                f"Storage backend {type(self._storage).__name__} does not support "
+                f"raw episodes. Use SQLiteStorage or PostgresStorage."
+            )
+
+        self._storage.save_episodes(self._agent_id, [episode])
+
+        if materialize:
+            claims = materialize_episode(episode)
+            if claims and hasattr(self._storage, "save_claims"):
+                self._storage.save_claims(self._agent_id, claims)
+                dirty = dirty_keys_for_claims(claims)
+                if dirty and isinstance(self._storage, MaterializationMetaStore):
+                    import json as _json
+
+                    raw_meta = self._storage.load_materialization_meta(self._agent_id)
+                    meta = cast(dict[str, Any], raw_meta)
+                    old_keys = _json.loads(meta.get("dirty_keys_json", "[]"))
+                    new_keys = old_keys + [
+                        {
+                            "subject": k.subject,
+                            "relation": k.relation,
+                            "bundle_kind": k.bundle_kind.value if k.bundle_kind else None,
+                            "topic": k.topic,
+                        }
+                        for k in dirty
+                    ]
+                    self._storage.save_materialization_meta(
+                        self._agent_id,
+                        schema_version=int(meta.get("schema_version", 2)),
+                        materialization_version=int(meta.get("materialization_version", 0)),
+                        dirty_keys_json=_json.dumps(new_keys),
+                        rebuild_status=str(meta.get("rebuild_status", "ready")),
+                    )
+
+        return episode
+
+    def ingest_episodes(self, episodes: Any, *, materialize: bool = True) -> None:
+        """Batch ingest of RawEpisode objects.
+
+        Args:
+            episodes:    Iterable of RawEpisode objects.
+            materialize: If True, materialize all episodes in one pass.
+        """
+        from ai_knot.materialization import dirty_keys_for_claims, rebuild_claims_from_raw
+
+        eps = list(episodes)
+        if not eps:
+            return
+        if not hasattr(self._storage, "save_episodes"):
+            raise TypeError(
+                f"Storage backend {type(self._storage).__name__} does not support raw episodes."
+            )
+        self._storage.save_episodes(self._agent_id, eps)
+
+        if materialize and hasattr(self._storage, "save_claims"):
+            claims = rebuild_claims_from_raw(eps)
+            if claims:
+                self._storage.save_claims(self._agent_id, claims)
+                dirty = dirty_keys_for_claims(claims)
+                if dirty and isinstance(self._storage, MaterializationMetaStore):
+                    import json as _json
+
+                    raw_meta = self._storage.load_materialization_meta(self._agent_id)
+                    meta = cast(dict[str, Any], raw_meta)
+                    old_keys = _json.loads(meta.get("dirty_keys_json", "[]"))
+                    new_keys = old_keys + [
+                        {
+                            "subject": k.subject,
+                            "relation": k.relation,
+                            "bundle_kind": k.bundle_kind.value if k.bundle_kind else None,
+                            "topic": k.topic,
+                        }
+                        for k in dirty
+                    ]
+                    self._storage.save_materialization_meta(
+                        self._agent_id,
+                        schema_version=int(meta.get("schema_version", 2)),
+                        materialization_version=int(meta.get("materialization_version", 0)),
+                        dirty_keys_json=_json.dumps(new_keys),
+                        rebuild_status=str(meta.get("rebuild_status", "ready")),
+                    )
+
+    def query(
+        self,
+        question: str,
+        *,
+        top_k: int = 60,
+        now: datetime | None = None,
+        render: str = "structured",
+    ) -> QueryAnswer:
+        """Contract-first query over materialized memory planes.
+
+        Requires raw episodes to have been ingested via ingest_episode().
+        Falls back gracefully to an empty answer (never calls legacy recall).
+
+        Args:
+            question:  Natural-language question.
+            top_k:     Maximum bundles to retrieve.
+            now:       Override current time (for testing).
+            render:    "structured" (default) or "narrative" (LLM renderer).
+
+        Returns:
+            A QueryAnswer with text, items, confidence, and trace.
+
+        Raises:
+            RuntimeError: If raw episode storage is not available.
+        """
+        from ai_knot.query_runtime import execute_query
+
+        if not hasattr(self._storage, "load_claims"):
+            raise RuntimeError(
+                "query() requires a storage backend that supports v2 query planes "
+                "(SQLiteStorage or PostgresStorage). Current backend: "
+                f"{type(self._storage).__name__}"
+            )
+
+        renderer = None
+        if render == "narrative" and self._default_provider:
+            renderer = self._make_narrative_renderer()
+
+        return execute_query(
+            self._storage,
+            self._agent_id,
+            question,
+            top_k=top_k,
+            now=now,
+            renderer=renderer,
+        )
+
+    def query_json(self, question: str, **kwargs: Any) -> dict[str, Any]:
+        """Same as query() but returns a JSON-serializable dict."""
+        return self.query(question, **kwargs).to_json()
+
+    def rebuild_materialized(
+        self,
+        *,
+        scope: str = "all",
+        force: bool = False,
+    ) -> RebuildReport:
+        """Rebuild materialized planes (claims + bundles) from raw episodes.
+
+        Deterministic and idempotent.
+
+        Args:
+            scope:  "all" (default) — rebuild claims + bundles.
+            force:  If True, rebuild even if materialization_version is current.
+
+        Returns:
+            A RebuildReport.
+        """
+        import time as _time
+
+        from ai_knot.materialization import (
+            MATERIALIZATION_VERSION,
+            rebuild_claims_from_raw,
+        )
+        from ai_knot.query_types import RebuildReport
+
+        if not hasattr(self._storage, "load_episodes"):
+            from ai_knot.query_types import RebuildReport
+
+            return RebuildReport(skipped=True, error="storage does not support raw episode plane")
+
+        # Check if rebuild is needed.
+        meta: dict[str, object] = {}
+        if hasattr(self._storage, "load_materialization_meta"):
+            meta = self._storage.load_materialization_meta(self._agent_id)
+
+        current_ver = meta.get("materialization_version", 0)
+        if current_ver == MATERIALIZATION_VERSION and not force and scope == "all":
+            return RebuildReport(skipped=True, materialization_version=current_ver)
+
+        t0 = _time.monotonic()
+
+        # Mark in-progress.
+        if hasattr(self._storage, "save_materialization_meta"):
+            self._storage.save_materialization_meta(
+                self._agent_id,
+                schema_version=2,
+                materialization_version=current_ver,
+                dirty_keys_json="[]",
+                rebuild_status="in_progress",
+            )
+
+        try:
+            episodes = self._storage.load_episodes(self._agent_id)
+            claims = rebuild_claims_from_raw(episodes, version=MATERIALIZATION_VERSION)
+
+            if hasattr(self._storage, "delete_all_claims"):
+                self._storage.delete_all_claims(self._agent_id)
+            if hasattr(self._storage, "save_claims") and claims:
+                self._storage.save_claims(self._agent_id, claims)
+
+            n_bundles = 0
+            if hasattr(self._storage, "clear_all_bundles"):
+                self._storage.clear_all_bundles(self._agent_id)
+                # Bundles rebuilt lazily on first query — only count cleared.
+                n_bundles = 0
+
+            if hasattr(self._storage, "save_materialization_meta"):
+                self._storage.save_materialization_meta(
+                    self._agent_id,
+                    schema_version=2,
+                    materialization_version=MATERIALIZATION_VERSION,
+                    last_rebuild_at=datetime.now(UTC),
+                    dirty_keys_json="[]",
+                    rebuild_status="ready",
+                )
+
+            return RebuildReport(
+                skipped=False,
+                n_episodes=len(episodes),
+                n_claims=len(claims),
+                n_bundles_cleared=n_bundles,
+                materialization_version=MATERIALIZATION_VERSION,
+                duration_s=_time.monotonic() - t0,
+            )
+
+        except Exception:
+            if hasattr(self._storage, "save_materialization_meta"):
+                self._storage.save_materialization_meta(
+                    self._agent_id,
+                    schema_version=2,
+                    materialization_version=current_ver,
+                    dirty_keys_json="[]",
+                    rebuild_status="error",
+                )
+            raise
+
+    def explain_query(self, question: str, **kwargs: Any) -> Any:
+        """Return only the AnswerTrace for a question (no text rendering)."""
+        return self.query(question, **kwargs).trace
+
+    def _make_narrative_renderer(self) -> Any:
+        """Return a callable that uses the default LLM provider for narrative rendering."""
+        raw_provider = self._default_provider
+        api_key = self._default_api_key
+        model = self._default_model or "gpt-4o-mini"
+
+        def _renderer(fragments: str) -> str:
+            if raw_provider is None:
+                return fragments
+            try:
+                from ai_knot.providers import create_provider
+                from ai_knot.providers.base import call_with_retry
+
+                p = create_provider(
+                    raw_provider if isinstance(raw_provider, str) else raw_provider.name,
+                    api_key=api_key,
+                    model=model,
+                )
+                return call_with_retry(
+                    p,
+                    "Synthesize the following facts into a fluent answer.",
+                    fragments,
+                    model,
+                )
+            except Exception:
+                return fragments
+
+        return _renderer
 
     def stats(self) -> dict[str, Any]:
         """Return statistics about the knowledge base.

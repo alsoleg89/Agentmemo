@@ -77,6 +77,10 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.lint.per-file-ignores]
 # Fixture data files contain intentionally long string literals (benchmark content).
 "tests/eval/benchmark/fixtures.py" = ["E501"]
+# SQLite storage: SQL strings in f-strings cannot be line-wrapped without breaking SQL.
+"src/ai_knot/storage/sqlite_storage.py" = ["E501"]
+# Isolation gate tests: long assertion messages are intentional.
+"tests/test_query_runtime_isolation.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ai_knot"]

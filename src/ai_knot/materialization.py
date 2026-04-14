@@ -1,0 +1,470 @@
+"""Deterministic rule-based materializer — converts RawEpisode → list[AtomicClaim].
+
+Design constraints (enforced by tests/test_materialization_kind_whitelist.py):
+  * Only emits ClaimKind.STATE / RELATION / EVENT / DURATION / TRANSITION.
+  * Never calls any LLM or network service.
+  * Fully deterministic: same RawEpisode → same AtomicClaim set every time.
+  * Every produced claim has a non-empty source_episode_id and source_spans.
+
+LLM-enriched DESCRIPTOR / INTENT claims are handled by ai_knot.enrichment (offline
+optional pass) and must NEVER be produced here.
+
+Current materialization version.  Increment when the extraction logic changes
+so that rebuild_materialized() can detect stale claims.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from datetime import UTC, datetime
+
+from ai_knot.query_types import (
+    DETERMINISTIC_CLAIM_KINDS,
+    AtomicClaim,
+    ClaimKind,
+    DirtyKey,
+    RawEpisode,
+)
+
+MATERIALIZATION_VERSION: int = 1
+
+# ---------------------------------------------------------------------------
+# Regex patterns for deterministic extraction
+# ---------------------------------------------------------------------------
+
+# Sentence boundary splitter (handles .!? followed by whitespace or end).
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+# Date/time patterns — used to detect EVENT and DURATION claims.
+_DATE_RE = re.compile(
+    r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[./]\d{1,2}[./]\d{2,4}"
+    r"|(?:january|february|march|april|may|june|july|august|september"
+    r"|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)"
+    r"\s+\d{1,2}(?:st|nd|rd|th)?(?:\s*,\s*\d{4})?)\b",
+    re.IGNORECASE,
+)
+
+_DURATION_RE = re.compile(
+    r"\bfor\s+(?:about\s+)?(\d+\s+(?:second|minute|hour|day|week|month|year)s?)\b",
+    re.IGNORECASE,
+)
+
+# Entity-state patterns: "X is/was/are/were Y", "X has/had Y".
+_STATE_RE = re.compile(
+    r"^([A-Z][^,\.]{1,40}?)\s+(?:is|was|are|were|has|had|have|becomes?|became|"
+    r"remains?|remained|seems?|seemed|looks?|looked)\s+(.{3,80})$",
+    re.IGNORECASE,
+)
+
+# Occupation/role patterns: "X works as Y", "X serves as Y", "X acts as Y".
+_ROLE_RE = re.compile(
+    r"^([A-Z][^,\.]{1,40}?)\s+"
+    r"(?:works?|worked|serves?|served|acts?|acted|functions?|functioned)\s+"
+    r"(?:as\s+(?:a\s+|an\s+)?|as\s+)(.{3,60})$",
+    re.IGNORECASE,
+)
+
+# Relation patterns: "X [verb] Y", "X and Y [verb]"
+_RELATION_RE = re.compile(
+    r"^([A-Z][^,\.]{1,40}?)\s+"
+    r"(?:knows?|knew|met|meets?|helped|helps?|loves?|loved|married|marries?|"
+    r"hired|hires?|trained|trains?|supported|supports?|founded|co-founded?)\s+"
+    r"([A-Z][^,\.]{1,40})$",
+    re.IGNORECASE,
+)
+
+# Transition patterns: "X moved to Y", "X changed from A to B", "X became Y".
+_TRANSITION_RE = re.compile(
+    r"^([A-Z][^,\.]{1,40}?)\s+"
+    r"(?:moved?|relocated?|transferred?|promoted?|switched?|changed?|transitioned?)\s+"
+    r"(?:to|from|into|toward)\s+(.{3,60})$",
+    re.IGNORECASE,
+)
+
+# Session-date prefix extracted by dated-learn ingest mode.
+_DATE_PREFIX_RE = re.compile(r"^\[([^\]]+)\]\s*")
+
+# Name-like token (two or more capitalized words).
+_PROPER_NAME_RE = re.compile(r"\b([A-Z][a-z]+ (?:[A-Z][a-z]+ )?[A-Z][a-z]+)\b")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def materialize_episode(raw: RawEpisode) -> list[AtomicClaim]:
+    """Convert one RawEpisode into zero or more AtomicClaims.
+
+    Deterministic: same input always produces the same output.
+    Only emits the five DETERMINISTIC_CLAIM_KINDS.
+    Raises AssertionError if a claim with DESCRIPTOR or INTENT kind would be
+    produced (guard against future regressions).
+    """
+    now = datetime.now(UTC)
+    text, session_date = _strip_date_prefix(raw.raw_text)
+    session_date = session_date or raw.session_date
+
+    sentences = _split_sentences(text)
+    claims: list[AtomicClaim] = []
+
+    for sent in sentences:
+        sent = sent.strip()
+        if len(sent) < 6:
+            continue
+        extracted = _extract_from_sentence(sent, raw, session_date, now)
+        claims.extend(extracted)
+
+    # Invariant guard — fail fast during testing.
+    for c in claims:
+        assert c.kind in DETERMINISTIC_CLAIM_KINDS, (
+            f"Materializer emitted forbidden kind {c.kind!r} for episode {raw.id!r}. "
+            f"DESCRIPTOR/INTENT are enrichment-only."
+        )
+
+    return claims
+
+
+def rebuild_claims_from_raw(
+    episodes: list[RawEpisode],
+    *,
+    version: int = MATERIALIZATION_VERSION,
+) -> list[AtomicClaim]:
+    """Rebuild all claims from a list of raw episodes.
+
+    Deterministic: calling this twice with the same episodes + same version
+    produces an identical claim set.
+    """
+    all_claims: list[AtomicClaim] = []
+    for ep in episodes:
+        claims = materialize_episode(ep)
+        # Stamp requested version on all claims.
+        if version != MATERIALIZATION_VERSION:
+            claims = [_with_version(c, version) for c in claims]
+        all_claims.extend(claims)
+    return all_claims
+
+
+def dirty_keys_for_claims(claims: list[AtomicClaim]) -> list[DirtyKey]:
+    """Compute the minimal set of DirtyKeys for a batch of new/updated claims.
+
+    Uses the finest-grained key level possible:
+    - slot_key set → DirtyKey.for_slot(subject, relation)
+    - no slot_key  → DirtyKey.for_subject(subject)
+    Deduplicates keys before returning.
+    """
+    seen: set[tuple[str, str | None]] = set()
+    keys: list[DirtyKey] = []
+    for c in claims:
+        if c.subject and c.relation:
+            sk: tuple[str, str | None] = (c.subject, c.relation)
+            if sk not in seen:
+                seen.add(sk)
+                keys.append(DirtyKey.for_slot(c.subject, c.relation))
+        elif c.subject:
+            sk = (c.subject, None)
+            if sk not in seen:
+                seen.add(sk)
+                keys.append(DirtyKey.for_subject(c.subject))
+    return keys
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _strip_date_prefix(text: str) -> tuple[str, datetime | None]:
+    """Remove a leading [DATE] prefix and return (cleaned_text, parsed_date)."""
+    m = _DATE_PREFIX_RE.match(text)
+    if not m:
+        return text, None
+    date_str = m.group(1)
+    clean = text[m.end() :]
+    parsed = _parse_date_str(date_str)
+    return clean, parsed
+
+
+def _parse_date_str(s: str) -> datetime | None:
+    """Try a few common date formats; return None on failure."""
+    for fmt in (
+        "%d %B, %Y",
+        "%d %B %Y",
+        "%B %d, %Y",
+        "%B %d %Y",
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%d.%m.%Y",
+    ):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences; also split on newlines."""
+    parts: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts.extend(_SENT_SPLIT.split(line))
+    return [p for p in parts if p]
+
+
+def _make_claim_id(raw_id: str, suffix: str) -> str:
+    """Deterministic claim ID from episode_id + disambiguating suffix."""
+    key = f"{raw_id}|{suffix}"
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def _extract_from_sentence(
+    sent: str,
+    raw: RawEpisode,
+    session_date: datetime | None,
+    now: datetime,
+) -> list[AtomicClaim]:
+    """Try all extraction patterns on a single sentence; return matched claims."""
+    results: list[AtomicClaim] = []
+
+    # --- DURATION --------------------------------------------------------
+    m = _DURATION_RE.search(sent)
+    if m:
+        duration_str = m.group(1)
+        # Find subject if present.
+        subject = _extract_simple_subject(sent[: m.start()]) or "unknown"
+        claim_id = _make_claim_id(raw.id, f"duration:{sent[:30]}")
+        span = (m.start(), m.end())
+        results.append(
+            _make_claim(
+                claim_id=claim_id,
+                raw=raw,
+                kind=ClaimKind.DURATION,
+                subject=subject,
+                relation="duration",
+                value_text=duration_str,
+                qualifiers={"source_sentence": sent[:120]},
+                event_time=session_date,
+                session_date=session_date,
+                now=now,
+                span=span,
+            )
+        )
+        return results  # one claim per sentence max for duration
+
+    # --- TRANSITION ------------------------------------------------------
+    m = _TRANSITION_RE.match(sent)
+    if m:
+        subject, dest = m.group(1).strip(), m.group(2).strip()
+        claim_id = _make_claim_id(raw.id, f"transition:{sent[:30]}")
+        results.append(
+            _make_claim(
+                claim_id=claim_id,
+                raw=raw,
+                kind=ClaimKind.TRANSITION,
+                subject=subject,
+                relation="moved_to",
+                value_text=dest,
+                qualifiers={},
+                event_time=session_date,
+                session_date=session_date,
+                now=now,
+                span=(m.start(), m.end()),
+            )
+        )
+        return results
+
+    # --- RELATION --------------------------------------------------------
+    m = _RELATION_RE.match(sent)
+    if m:
+        subject, obj = m.group(1).strip(), m.group(2).strip()
+        verb_m = re.search(
+            r"\b(knows?|knew|met|meets?|helped|helps?|loves?|loved|"
+            r"married|marries?|hired|hires?|trained|trains?|"
+            r"supported|supports?|founded|co-founded?)\b",
+            sent,
+            re.IGNORECASE,
+        )
+        relation = verb_m.group(1).lower().rstrip("s") if verb_m else "related_to"
+        claim_id = _make_claim_id(raw.id, f"relation:{sent[:30]}")
+        results.append(
+            _make_claim(
+                claim_id=claim_id,
+                raw=raw,
+                kind=ClaimKind.RELATION,
+                subject=subject,
+                relation=relation,
+                value_text=obj,
+                qualifiers={},
+                event_time=session_date,
+                session_date=session_date,
+                now=now,
+                span=(m.start(), m.end()),
+            )
+        )
+        return results
+
+    # --- ROLE (subtype of STATE) -----------------------------------------
+    m = _ROLE_RE.match(sent)
+    if m:
+        subject, role = m.group(1).strip(), m.group(2).strip()
+        claim_id = _make_claim_id(raw.id, f"state_role:{sent[:30]}")
+        slot_key = f"{subject}::role"
+        results.append(
+            _make_claim(
+                claim_id=claim_id,
+                raw=raw,
+                kind=ClaimKind.STATE,
+                subject=subject,
+                relation="role",
+                value_text=role,
+                qualifiers={},
+                event_time=None,
+                session_date=session_date,
+                now=now,
+                span=(m.start(), m.end()),
+                slot_key=slot_key,
+            )
+        )
+        return results
+
+    # --- STATE -----------------------------------------------------------
+    m = _STATE_RE.match(sent)
+    if m:
+        subject, predicate = m.group(1).strip(), m.group(2).strip()
+        if len(subject) >= 2 and len(predicate) >= 2:
+            claim_id = _make_claim_id(raw.id, f"state:{sent[:30]}")
+            results.append(
+                _make_claim(
+                    claim_id=claim_id,
+                    raw=raw,
+                    kind=ClaimKind.STATE,
+                    subject=subject,
+                    relation="state",
+                    value_text=predicate,
+                    qualifiers={},
+                    event_time=None,
+                    session_date=session_date,
+                    now=now,
+                    span=(m.start(), m.end()),
+                )
+            )
+            return results
+
+    # --- EVENT (fallback: sentence has a date and a subject-like token) --
+    date_m = _DATE_RE.search(sent)
+    if date_m:
+        event_date = _parse_date_str(date_m.group(0)) or session_date
+        subject = _extract_simple_subject(sent) or "unknown"
+        claim_id = _make_claim_id(raw.id, f"event:{sent[:30]}")
+        results.append(
+            _make_claim(
+                claim_id=claim_id,
+                raw=raw,
+                kind=ClaimKind.EVENT,
+                subject=subject,
+                relation="occurred",
+                value_text=sent[:200],
+                qualifiers={"date_token": date_m.group(0)},
+                event_time=event_date,
+                session_date=session_date,
+                now=now,
+                span=(0, len(sent)),
+            )
+        )
+        return results
+
+    return []
+
+
+def _extract_simple_subject(text: str) -> str | None:
+    """Extract the first proper-name-like token from text."""
+    m = _PROPER_NAME_RE.search(text)
+    if m:
+        return m.group(1)
+    # Fall back to first capitalized word.
+    parts = text.split()
+    for p in parts:
+        p = p.strip(".,;:!?")
+        if p and p[0].isupper() and len(p) > 2:
+            return p
+    return None
+
+
+def _make_claim(
+    *,
+    claim_id: str,
+    raw: RawEpisode,
+    kind: ClaimKind,
+    subject: str,
+    relation: str,
+    value_text: str,
+    qualifiers: dict[str, str],
+    event_time: datetime | None,
+    session_date: datetime | None,
+    now: datetime,
+    span: tuple[int, int],
+    slot_key: str = "",
+) -> AtomicClaim:
+    """Construct a single AtomicClaim with all required fields populated."""
+    from ai_knot.tokenizer import tokenize as _tokenize
+
+    tokens = tuple(_tokenize(value_text))
+    if not slot_key and subject and relation:
+        slot_key = f"{subject}::{relation}"
+    return AtomicClaim(
+        id=claim_id,
+        agent_id=raw.agent_id,
+        kind=kind,
+        subject=subject,
+        relation=relation,
+        value_text=value_text,
+        value_tokens=tokens,
+        qualifiers=qualifiers,
+        polarity="support",
+        event_time=event_time,
+        observed_at=raw.observed_at,
+        valid_from=session_date or raw.observed_at,
+        valid_until=None,
+        confidence=0.85,
+        salience=1.0,
+        source_episode_id=raw.id,
+        source_spans=(span,),
+        materialization_version=MATERIALIZATION_VERSION,
+        materialized_at=now,
+        slot_key=slot_key,
+        version=0,
+        origin_agent_id=raw.agent_id,
+    )
+
+
+def _with_version(claim: AtomicClaim, version: int) -> AtomicClaim:
+    """Return a copy of claim with materialization_version set to version."""
+    return AtomicClaim(
+        id=claim.id,
+        agent_id=claim.agent_id,
+        kind=claim.kind,
+        subject=claim.subject,
+        relation=claim.relation,
+        value_text=claim.value_text,
+        value_tokens=claim.value_tokens,
+        qualifiers=claim.qualifiers,
+        polarity=claim.polarity,
+        event_time=claim.event_time,
+        observed_at=claim.observed_at,
+        valid_from=claim.valid_from,
+        valid_until=claim.valid_until,
+        confidence=claim.confidence,
+        salience=claim.salience,
+        source_episode_id=claim.source_episode_id,
+        source_spans=claim.source_spans,
+        materialization_version=version,
+        materialized_at=claim.materialized_at,
+        slot_key=claim.slot_key,
+        version=claim.version,
+        origin_agent_id=claim.origin_agent_id,
+    )

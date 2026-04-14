@@ -2,12 +2,31 @@ import { McpClient } from "./client.js";
 import type {
   AddOptions,
   Fact,
+  IngestEpisodeOptions,
+  IngestEpisodeResult,
   KnowledgeBaseOptions,
+  LearnMessage,
+  LearnResult,
+  QueryAnswer,
+  QueryOptions,
   RecallOptions,
   Stats,
 } from "./types.js";
 
-export type { AddOptions, Fact, KnowledgeBaseOptions, MemoryType, RecallOptions, Stats } from "./types.js";
+export type {
+  AddOptions,
+  Fact,
+  IngestEpisodeOptions,
+  IngestEpisodeResult,
+  KnowledgeBaseOptions,
+  LearnMessage,
+  LearnResult,
+  MemoryType,
+  QueryAnswer,
+  QueryOptions,
+  RecallOptions,
+  Stats,
+} from "./types.js";
 
 /**
  * TypeScript client for ai_knot. Spawns the ai-knot-mcp subprocess on
@@ -77,6 +96,16 @@ export class KnowledgeBase {
   }
 
   /**
+   * Extract and store knowledge from a conversation using an LLM.
+   * Requires AI_KNOT_PROVIDER and AI_KNOT_API_KEY env vars (or provider
+   * configured at KnowledgeBase construction via the `env` option).
+   */
+  async learn(messages: LearnMessage[]): Promise<LearnResult> {
+    const text = await this.client.call("learn", { messages });
+    return JSON.parse(text) as LearnResult;
+  }
+
+  /**
    * Remove a fact by its 8-character hex ID.
    */
   async forget(factId: string): Promise<void> {
@@ -120,6 +149,43 @@ export class KnowledgeBase {
     if (text.toLowerCase().includes("not supported") || text.toLowerCase().includes("not found")) {
       throw new Error(text);
     }
+  }
+
+  /**
+   * Ingest a single raw conversation turn into memory.
+   *
+   * Stores as RawEpisode and deterministically extracts AtomicClaims.
+   * Does NOT call the LLM. Prefer this over ``add()`` for batch ingest
+   * from raw conversation data.
+   */
+  async ingestEpisode(options: IngestEpisodeOptions): Promise<IngestEpisodeResult> {
+    const args: Record<string, unknown> = {
+      session_id: options.sessionId,
+      turn_id: options.turnId,
+      raw_text: options.rawText,
+    };
+    if (options.speaker !== undefined) args["speaker"] = options.speaker;
+    if (options.observedAt !== undefined) args["observed_at"] = options.observedAt;
+    if (options.sessionDate !== undefined) args["session_date"] = options.sessionDate;
+    if (options.sourceMeta !== undefined) args["source_meta"] = options.sourceMeta;
+    if (options.parentEpisodeId !== undefined) args["parent_episode_id"] = options.parentEpisodeId;
+    if (options.materialize !== undefined) args["materialize"] = options.materialize;
+    const text = await this.client.call("ingest_episode", args);
+    return JSON.parse(text) as IngestEpisodeResult;
+  }
+
+  /**
+   * Contract-first query over memory. Returns structured answer with trace.
+   *
+   * Uses the full pipeline: analyze_query → retrieve_bundles → expand_claims
+   * → build_evidence_profile → choose_strategy → operator.
+   */
+  async query(question: string, options: QueryOptions = {}): Promise<QueryAnswer> {
+    const args: Record<string, unknown> = { question };
+    if (options.topK !== undefined) args["top_k"] = options.topK;
+    if (options.render !== undefined) args["render"] = options.render;
+    const text = await this.client.call("query_json", args);
+    return JSON.parse(text) as QueryAnswer;
   }
 
   /**

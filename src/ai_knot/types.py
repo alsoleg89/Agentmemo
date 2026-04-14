@@ -225,10 +225,14 @@ class ConversationTurn:
     Attributes:
         role: "user" or "assistant".
         content: The message text.
+        timestamp: When this message occurred (UTC).  Optional — used by the
+            extractor to resolve relative temporal references ("yesterday",
+            "last week") to absolute dates.
     """
 
     role: str
     content: str
+    timestamp: datetime | None = None
 
 
 # ---------------------------------------------------------------------------

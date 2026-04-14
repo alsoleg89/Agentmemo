@@ -1,4 +1,5 @@
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -11,8 +12,9 @@ import { fileURLToPath } from "node:url";
 import type { LanguageModelV1 } from "ai";
 
 import { AiknotAdapter } from "./aiknot.js";
+import type { IngestMode, QueryMode } from "./aiknot.js";
 import { answerQuestion, judgeAnswer } from "./evaluator.js";
-import type { Verdict } from "./evaluator.js";
+import type { Verdict, Usage } from "./evaluator.js";
 import { filterQA, loadDataset } from "./locomo.js";
 import type { LoadOptions } from "./locomo.js";
 
@@ -38,6 +40,10 @@ function reportPath(runId: string): string {
   return resolve(runDir(runId), "report.json");
 }
 
+function logPath(runId: string): string {
+  return resolve(runDir(runId), "log.jsonl");
+}
+
 function dbPath(runId: string): string {
   return resolve(runDir(runId), "knot.db");
 }
@@ -59,6 +65,7 @@ interface Checkpoint {
   updatedAt: string;
   ingested: number[];
   results: CheckpointResult[];
+  queryMode?: QueryMode;
 }
 
 function loadCheckpoint(runId: string): Checkpoint | null {
@@ -141,24 +148,26 @@ export interface EvaluatorFns {
     model: LanguageModelV1,
     context: string,
     question: string
-  ) => Promise<string>;
+  ) => Promise<{ text: string; usage: Usage }>;
   judgeFn: (
     model: LanguageModelV1,
     question: string,
     answer: string,
     gold: string
-  ) => Promise<Verdict>;
+  ) => Promise<{ verdict: Verdict; usage: Usage }>;
   adapterFactory: (
     runDbPath: string,
     convIdx: number,
     command: string,
     env: Record<string, string>,
-    topK: number
+    topK: number,
+    ingestMode: IngestMode,
+    queryMode: QueryMode
   ) => AiknotAdapterLike;
 }
 
 export interface AiknotAdapterLike {
-  ingest(turns: string[]): Promise<void>;
+  ingest(turns: string[], sessions?: import("./locomo.js").Session[]): Promise<void>;
   recall(question: string): Promise<string>;
   close(): Promise<void>;
 }
@@ -171,9 +180,27 @@ const defaultEvaluatorFns = (
   answerFn: (_, ctx, q) => answerQuestion(answerModel, ctx, q),
   judgeFn: (_, question, answer, gold) =>
     judgeAnswer(judgeModel, question, answer, gold),
-  adapterFactory: (dbPath, convIdx, _cmd, env, topK) =>
-    new AiknotAdapter(dbPath, convIdx, command, env, topK),
+  adapterFactory: (dbPath, convIdx, _cmd, env, topK, ingestMode, queryMode) =>
+    new AiknotAdapter(dbPath, convIdx, command, env, topK, ingestMode, queryMode),
 });
+
+interface LogEntry {
+  ts: string;
+  convIdx: number;
+  qaIdx: number;
+  category: number;
+  question: string;
+  goldAnswer: string;
+  context: string;
+  answer: string;
+  verdict: Verdict;
+  answerUsage: Usage;
+  judgeUsage: Usage;
+}
+
+function appendLog(runId: string, entry: LogEntry): void {
+  appendFileSync(logPath(runId), JSON.stringify(entry) + "\n", "utf-8");
+}
 
 // ---- RunOptions -------------------------------------------------------------
 
@@ -186,7 +213,11 @@ export interface RunOptions extends LoadOptions {
   aiKnotCommand: string;
   aiKnotEnv?: Record<string, string>;
   topK?: number;
+  maxTurns?: number;
+  ingestMode?: IngestMode;
+  queryMode?: QueryMode;
   types?: number[];
+  convs?: number[];
   sample?: number;
   force?: boolean;
   _evaluatorOverride?: Partial<EvaluatorFns>;
@@ -204,7 +235,11 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
     aiKnotCommand,
     aiKnotEnv = {},
     topK = 5,
+    maxTurns,
+    ingestMode = "raw",
+    queryMode = "legacy_recall",
     types,
+    convs,
     sample,
     force,
     _evaluatorOverride,
@@ -229,14 +264,19 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
       updatedAt: new Date().toISOString(),
       ingested: [],
       results: [],
+      queryMode,
     };
     saveCheckpoint(cp);
   }
 
-  const dataset = await loadDataset({
+  let dataset = await loadDataset({
     locomoFile: opts.locomoFile,
     limit: opts.limit,
   });
+  if (convs && convs.length > 0) {
+    const convSet = new Set(convs);
+    dataset = dataset.filter((c) => convSet.has(c.idx));
+  }
 
   const fns: EvaluatorFns = {
     ...defaultEvaluatorFns(judgeModel, answerModel, aiKnotCommand),
@@ -272,14 +312,30 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
       continue;
     }
 
-    const adapter = fns.adapterFactory(dbPath(runId), conv.idx, aiKnotCommand, aiKnotEnv, topK);
+    const adapter = fns.adapterFactory(dbPath(runId), conv.idx, aiKnotCommand, aiKnotEnv, topK, ingestMode, queryMode);
 
     try {
       if (!cp!.ingested.includes(conv.idx)) {
         process.stdout.write(
           `  conv ${convLabel}/${dataset.length} — ingesting ${conv.turns.length} turns… `
         );
-        await adapter.ingest(conv.turns);
+        const turns = maxTurns !== undefined ? conv.turns.slice(0, maxTurns) : conv.turns;
+        let sessions = conv.sessions;
+        if (maxTurns !== undefined) {
+          let remaining = maxTurns;
+          sessions = [];
+          for (const s of conv.sessions) {
+            if (remaining <= 0) break;
+            if (s.turns.length <= remaining) {
+              sessions.push(s);
+              remaining -= s.turns.length;
+            } else {
+              sessions.push({ ...s, turns: s.turns.slice(0, remaining) });
+              remaining = 0;
+            }
+          }
+        }
+        await adapter.ingest(turns, sessions);
         cp!.ingested.push(conv.idx);
         saveCheckpoint(cp!);
         process.stdout.write("done\n");
@@ -287,8 +343,8 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
 
       for (const qa of pending) {
         const context = await adapter.recall(qa.question);
-        const answer = await fns.answerFn(answerModel, context, qa.question);
-        const verdict = await fns.judgeFn(
+        const { text: answer, usage: answerUsage } = await fns.answerFn(answerModel, context, qa.question);
+        const { verdict, usage: judgeUsage } = await fns.judgeFn(
           judgeModel,
           qa.question,
           answer,
@@ -302,6 +358,20 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
           verdict,
         });
         saveCheckpoint(cp!);
+
+        appendLog(runId, {
+          ts: new Date().toISOString(),
+          convIdx: conv.idx,
+          qaIdx: qa.idx,
+          category: qa.category,
+          question: qa.question,
+          goldAnswer: qa.answer,
+          context,
+          answer,
+          verdict,
+          answerUsage,
+          judgeUsage,
+        });
 
         const done = cp!.results.length;
         const icon = verdict === "CORRECT" ? "✓" : "✗";

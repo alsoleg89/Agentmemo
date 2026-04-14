@@ -40,8 +40,67 @@ export interface AddOptions {
   tags?: string[];
 }
 
+export interface LearnMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface LearnResult {
+  stored: number;
+  ids: string[];
+}
+
 export interface RecallOptions {
   topK?: number;
+}
+
+// ---- New-gen Track A types --------------------------------------------------
+
+export interface IngestEpisodeOptions {
+  /** Session identifier (groups turns into conversations). */
+  sessionId: string;
+  /** Unique turn identifier within the session. */
+  turnId: string;
+  /** Raw conversation text for this turn. */
+  rawText: string;
+  /** Speaker role. Default: "user". */
+  speaker?: string;
+  /** ISO datetime string (defaults to now). */
+  observedAt?: string;
+  /** Optional ISO date for session-level temporal anchor. */
+  sessionDate?: string;
+  /** Optional metadata. */
+  sourceMeta?: Record<string, unknown>;
+  /** Optional parent episode ID. */
+  parentEpisodeId?: string;
+  /** Extract AtomicClaims immediately. Default: true. */
+  materialize?: boolean;
+}
+
+export interface IngestEpisodeResult {
+  episode_id: string;
+  session_id: string;
+}
+
+export interface AnswerItem {
+  value: string;
+  confidence: number;
+  source_claim_ids: string[];
+  source_episode_ids: string[];
+}
+
+export interface QueryOptions {
+  /** Maximum bundles to retrieve. Default: 60. */
+  topK?: number;
+  /** "structured" or "narrative". Default: "structured". */
+  render?: "structured" | "narrative";
+}
+
+export interface QueryAnswer {
+  text: string;
+  items: AnswerItem[];
+  confidence: number;
+  trace: Record<string, unknown>;
 }
 
 // ---- Internal JSON-RPC 2.0 types ----------------------------------------
