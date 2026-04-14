@@ -20,7 +20,7 @@ from ai_knot.query_types import (
     ClaimKind,
     RawEpisode,
     SupportBundle,
-    make_bundle_id,
+    stable_bundle_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def build_entity_topic_bundles(
 
     for subject, group in groups.items():
         score = _aggregate_score(group)
-        bid = make_bundle_id()
+        bid = stable_bundle_id(BundleKind.ENTITY_TOPIC, subject)
         b = SupportBundle(
             id=bid,
             agent_id=agent_id,
@@ -95,7 +95,7 @@ def build_state_timeline_bundles(
         # Sort by valid_from desc so most recent state is first.
         sorted_group = sorted(group, key=lambda c: c.valid_from, reverse=True)
         score = _aggregate_score(sorted_group)
-        bid = make_bundle_id()
+        bid = stable_bundle_id(BundleKind.STATE_TIMELINE, slot_key)
         b = SupportBundle(
             id=bid,
             agent_id=agent_id,
@@ -147,7 +147,7 @@ def build_event_neighborhood_bundles(
 
         sorted_group = sorted(group, key=_event_sort_key)
         score = _aggregate_score(sorted_group)
-        bid = make_bundle_id()
+        bid = stable_bundle_id(BundleKind.EVENT_NEIGHBORHOOD, subject)
         b = SupportBundle(
             id=bid,
             agent_id=agent_id,
@@ -187,7 +187,7 @@ def build_relation_support_bundles(
 
     for key, group in groups.items():
         score = _aggregate_score(group)
-        bid = make_bundle_id()
+        bid = stable_bundle_id(BundleKind.RELATION_SUPPORT, key)
         b = SupportBundle(
             id=bid,
             agent_id=agent_id,

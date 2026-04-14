@@ -739,9 +739,19 @@ class SQLiteStorage:
     def save_bundles(
         self, agent_id: str, bundles: list[Any], memberships: dict[str, list[str]]
     ) -> None:
-        """Persist bundles and their member claim lists."""
+        """Persist bundles and their member claim lists.
+
+        Idempotent: any existing bundles for the same (kind, topic) pairs are
+        deleted first, including legacy random-id rows from older versions and
+        shrinking member sets.  This ensures exactly one bundle per
+        (agent_id, kind, topic) after the call.
+        """
         if not bundles:
             return
+        # (kind_val, topic) pairs we are about to write.
+        kt_pairs = {
+            (b.kind.value if hasattr(b.kind, "value") else str(b.kind), b.topic) for b in bundles
+        }
         bundle_rows = [
             (
                 b.id,
@@ -761,6 +771,19 @@ class SQLiteStorage:
             for rank, claim_id in enumerate(claim_ids)
         ]
         with self._conn() as conn:
+            # Purge stale bundles (and their memberships) for each (kind, topic)
+            # we are about to overwrite.  Handles both legacy random-id rows and
+            # the case where the new bundle has fewer members than the old one.
+            for kind_val, topic in kt_pairs:
+                conn.execute(
+                    "DELETE FROM bundle_members WHERE agent_id=? AND bundle_id IN "
+                    "(SELECT id FROM support_bundles WHERE agent_id=? AND kind=? AND topic=?)",
+                    (agent_id, agent_id, kind_val, topic),
+                )
+                conn.execute(
+                    "DELETE FROM support_bundles WHERE agent_id=? AND kind=? AND topic=?",
+                    (agent_id, kind_val, topic),
+                )
             conn.executemany(
                 """INSERT OR REPLACE INTO support_bundles
                    (id, agent_id, kind, topic, bundle_score, score_formula,

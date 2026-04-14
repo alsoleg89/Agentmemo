@@ -179,6 +179,29 @@ def test_p5_mcp_tool_falls_back_on_not_implemented(tmp_path: object, monkeypatch
 # ---------------------------------------------------------------------------
 
 
+def test_p7_reingest_same_turn_does_not_accumulate_bundles(tmp_path: object) -> None:
+    """Re-ingesting same (session_id, turn_id) must produce exactly one
+    ENTITY_TOPIC bundle per subject and a live answer at top_k=1."""
+    kb = _kb(tmp_path)
+    for text in [
+        "Alice is a software engineer.",
+        "Alice is a manager.",
+        "Alice is a director.",
+        "Alice is a VP.",
+    ]:
+        kb.ingest_episode(
+            session_id="s",
+            turn_id="t0",
+            speaker="user",
+            observed_at=NOW,
+            raw_text=text,
+        )
+    bundles = kb._storage.load_bundles_by_topic(kb._agent_id, ["Alice"])
+    assert len(bundles) == 1, f"Expected 1 ENTITY_TOPIC bundle for Alice, got {len(bundles)}"
+    answer = kb.query("What is Alice's job?", top_k=1, now=NOW)
+    assert answer.text, "query must return a non-empty answer, not 'No answer found'"
+
+
 def test_p6_reingest_same_turn_replaces_claims(tmp_path: object) -> None:
     """Re-ingesting the same turn must replace old claims, not accumulate them."""
     kb = _kb(tmp_path)

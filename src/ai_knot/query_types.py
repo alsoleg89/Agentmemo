@@ -208,6 +208,18 @@ def make_bundle_id() -> str:
     return uuid4().hex[:16]
 
 
+def stable_bundle_id(kind: BundleKind, topic: str) -> str:
+    """Deterministic id for a persisted bundle keyed by (kind, topic).
+
+    Schema PK is (agent_id, id); hashing (kind, topic) is sufficient to
+    prevent cross-topic collisions because topics are agent-scoped.
+    """
+    import hashlib
+
+    kind_val = kind.value if hasattr(kind, "value") else str(kind)
+    return hashlib.sha1(f"{kind_val}:{topic}".encode()).hexdigest()[:16]
+
+
 # ---------------------------------------------------------------------------
 # Dirty invalidation key (three-level granularity)
 # ---------------------------------------------------------------------------
