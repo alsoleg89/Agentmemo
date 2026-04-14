@@ -320,3 +320,80 @@ class PostgresStorage:
             )
             rows = cur.fetchall()
         return [self._fact_from_row(row) for row in rows]
+
+    # ---------------------------------------------------------------------- #
+    # v2 query planes — Track A stubs (full implementation in next release)   #
+    # ---------------------------------------------------------------------- #
+    #
+    # These methods make PostgresStorage pass isinstance() checks for
+    # RawEpisodeStore, ClaimStore, BundleStore, and MaterializationMetaStore.
+
+    def save_episodes(self, agent_id: str, episodes: list[Any]) -> None:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def load_episodes(self, agent_id: str, *, session_id: str | None = None) -> list[Any]:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def get_episode(self, agent_id: str, episode_id: str) -> Any:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def save_claims(self, agent_id: str, claims: list[Any]) -> None:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def load_claims(
+        self,
+        agent_id: str,
+        *,
+        ids: list[str] | None = None,
+        subjects: list[str] | None = None,
+        kinds: list[Any] | None = None,
+        active_only: bool = True,
+    ) -> list[Any]:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def iter_value_text(self, agent_id: str) -> list[tuple[str, str]]:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def replace_claims_for_episodes(
+        self, agent_id: str, episode_ids: list[str], new_claims: list[Any]
+    ) -> None:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def delete_all_claims(self, agent_id: str) -> None:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def save_bundles(
+        self, agent_id: str, bundles: list[Any], memberships: dict[str, list[str]]
+    ) -> None:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def load_bundles_by_topic(
+        self, agent_id: str, topics: list[str], kinds: list[Any] | None = None
+    ) -> list[Any]:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def load_bundle_members(
+        self, agent_id: str, bundle_ids: list[str]
+    ) -> dict[str, list[str]]:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def invalidate_by_keys(self, agent_id: str, keys: list[Any]) -> int:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def clear_all_bundles(self, agent_id: str) -> None:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def load_materialization_meta(self, agent_id: str) -> dict[str, object]:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
+
+    def save_materialization_meta(
+        self,
+        agent_id: str,
+        *,
+        schema_version: int,
+        materialization_version: int,
+        last_rebuild_at: datetime | None = None,
+        dirty_keys_json: str = "[]",
+        rebuild_status: str = "ready",
+    ) -> None:
+        raise NotImplementedError("Postgres v2 plane not yet implemented")
