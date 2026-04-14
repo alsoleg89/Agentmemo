@@ -1422,6 +1422,16 @@ class KnowledgeBase(_LearningMixin):
             raise TypeError(
                 f"Storage backend {type(self._storage).__name__} does not support raw episodes."
             )
+        if isinstance(self._storage, YAMLStorage) and len(eps) > 1000:
+            import warnings
+
+            warnings.warn(
+                f"ingest_episodes called with {len(eps)} episodes on YAMLStorage. "
+                "YAML is not designed for large episode volumes. "
+                "Use SQLiteStorage or PostgresStorage for production workloads.",
+                UserWarning,
+                stacklevel=2,
+            )
         self._storage.save_episodes(self._agent_id, eps)
 
         if materialize and hasattr(self._storage, "save_claims"):
