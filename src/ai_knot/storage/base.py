@@ -177,6 +177,17 @@ class RawEpisodeStore(Protocol):
         """Retrieve a single episode by id."""
         ...
 
+    def search_episodes_by_entities(
+        self,
+        agent_id: str,
+        entities: tuple[str, ...] | list[str],
+        *,
+        query: str = "",
+        top_k: int = 5,
+    ) -> list[RawEpisode]:
+        """Optional: substring/FTS lookup by entity mentions, ranked by query overlap."""
+        ...
+
 
 @runtime_checkable
 class ClaimStore(Protocol):

@@ -313,6 +313,7 @@ class EvidenceProfile:
     slot_bundle_hits: int = 0  # bundles with "entity::relation" topic
     explicit_time_hits: int = 0  # claims with qualifiers['date_token']
     fallback_used: bool = False  # BM25 fallback was needed
+    episode_fallback_used: bool = False  # raw-episode search fallback was needed
     question_tokens: tuple[str, ...] = ()  # tokenized question for relevance scoring
     focus_entities: tuple[str, ...] = ()  # from QueryFrame
     focus_relation: str | None = None  # from QueryFrame
@@ -388,6 +389,7 @@ class AnswerTrace:
                 "slot_bundle_hits": self.evidence_profile.slot_bundle_hits,
                 "explicit_time_hits": self.evidence_profile.explicit_time_hits,
                 "fallback_used": self.evidence_profile.fallback_used,
+                "episode_fallback_used": self.evidence_profile.episode_fallback_used,
                 "question_tokens": list(self.evidence_profile.question_tokens),
                 "focus_entities": list(self.evidence_profile.focus_entities),
                 "focus_relation": self.evidence_profile.focus_relation,
@@ -411,10 +413,12 @@ class QueryAnswer:
     items: tuple[AnswerItem, ...]
     confidence: float
     trace: AnswerTrace
+    evidence_text: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
             "text": self.text,
+            "evidence_text": self.evidence_text,
             "confidence": self.confidence,
             "items": [
                 {

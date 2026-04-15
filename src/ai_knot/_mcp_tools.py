@@ -396,7 +396,8 @@ def tool_query_json(
 ) -> str:
     """Contract-first query returning full QueryAnswer as JSON.
 
-    Returns the complete structured payload: text, items (with confidence
+    Returns the complete structured payload: text, evidence_text (formatted
+    episode block ready for downstream LLM context), items (with confidence
     and provenance), and trace (strategy, evidence profile, latency).
 
     Args:

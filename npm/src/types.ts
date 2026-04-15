@@ -98,6 +98,9 @@ export interface QueryOptions {
 
 export interface QueryAnswer {
   text: string;
+  /** Formatted evidence block for downstream LLM context. Each entry is
+   *  '[N] [YYYY-MM-DD] Speaker: raw_text'. Empty string when no episodes found. */
+  evidence_text?: string;
   items: AnswerItem[];
   confidence: number;
   trace: Record<string, unknown>;

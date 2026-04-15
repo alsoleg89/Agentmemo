@@ -179,6 +179,14 @@ export class KnowledgeBase {
    *
    * Uses the full pipeline: analyze_query → retrieve_bundles → expand_claims
    * → build_evidence_profile → choose_strategy → operator.
+   *
+   * The returned {@link QueryAnswer} includes:
+   * - `text`: compact answer string (backward-compatible).
+   * - `evidence_text`: formatted episode block (`[N] [YYYY-MM-DD] Speaker: …`)
+   *   ready to inject into a downstream LLM prompt. Prefer this over `text`
+   *   when grounded context matters.
+   * - `items`: answer values with confidence and provenance.
+   * - `trace`: full audit trail (strategy, evidence profile, latency).
    */
   async query(question: string, options: QueryOptions = {}): Promise<QueryAnswer> {
     const args: Record<string, unknown> = { question };

@@ -635,6 +635,40 @@ class SQLiteStorage:
             ).fetchone()
         return _row_to_episode(row) if row else None
 
+    def search_episodes_by_entities(
+        self,
+        agent_id: str,
+        entities: tuple[str, ...] | list[str],
+        *,
+        query: str = "",
+        top_k: int = 5,
+    ) -> list[Any]:
+        """Substring/FTS lookup by entity mentions, ranked by query overlap."""
+        if not entities:
+            return []
+        placeholders = " OR ".join(["raw_text LIKE ?"] * len(entities))
+        params: list[Any] = [agent_id] + [f"%{e}%" for e in entities]
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, agent_id, session_id, turn_id, speaker, observed_at, "
+                "session_date, raw_text, source_meta, parent_episode_id "
+                "FROM raw_episodes WHERE agent_id=? AND (" + placeholders + ") "
+                "ORDER BY COALESCE(session_date, observed_at) DESC LIMIT 200",
+                params,
+            ).fetchall()
+        episodes = [_row_to_episode(r) for r in rows]
+        from ai_knot.tokenizer import tokenize
+
+        q_tokens = set(tokenize(query)) if query else set()
+
+        def score(ep: Any) -> tuple[int, Any]:
+            text_tokens = set(tokenize(ep.raw_text))
+            overlap = len(q_tokens & text_tokens) if q_tokens else 0
+            recency = ep.session_date or ep.observed_at
+            return (overlap, recency)
+
+        return sorted(episodes, key=score, reverse=True)[:top_k]
+
     # ------------------------------------------------------------------ #
     # ClaimStore (v2)
     # ------------------------------------------------------------------ #
