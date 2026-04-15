@@ -228,8 +228,9 @@ _RELATION_ALIASES: dict[str, tuple[str, ...]] = {
     "enjoy": ("likes",),
     "hate": ("dislikes",),
     "dislike": ("dislikes",),
+    "drive": ("drives",),
     "move": ("moved_to",),
-    "work": ("works_as",),
+    "work": ("works_at", "works_as"),
     "pass": ("passed_away",),
 }
 

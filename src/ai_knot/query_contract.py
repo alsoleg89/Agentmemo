@@ -373,13 +373,8 @@ _VERB_LEMMA_MAP: dict[str, str] = {
 # lookup so that "find … satisfying" wins over plain "find".
 _COMPOUND_RELATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:find|finds|found|finding)\b.*\bsatisfying\b", re.I), "finds_satisfying"),
-    (
-        re.compile(r"\b(?:love|loves|like|likes|enjoy|enjoys|adore|adores|prefer|prefers)\b", re.I),
-        "likes",
-    ),
-    (re.compile(r"\b(?:hate|hates|dislike|dislikes)\b", re.I), "dislikes"),
     (re.compile(r"\b(?:move|moves|moved|moving|relocate|relocated)\b\s+to\b", re.I), "moved_to"),
-    (re.compile(r"\b(?:work|works|worked|working)\b\s+as\b", re.I), "works_as"),
+    (re.compile(r"\b(?:work|works|worked|working)\b\s+as\b", re.I), "role"),
     (re.compile(r"\b(?:pass|passes|passed|passing)\b\s+away\b", re.I), "passed_away"),
 ]
 
@@ -531,6 +526,8 @@ def _extract_focus_relation(question: str, entities: list[str]) -> str | None:
     _RELATION_VERBS for single-token lemmas.
     Returns the canonical compound or lemma form.
     """
+    if re.search(r"\bwhat(?:'s| is| was)\b.+\blike\b\s*\??\s*$", question, re.I):
+        return None
     for pattern, compound_relation in _COMPOUND_RELATION_PATTERNS:
         if pattern.search(question):
             return compound_relation
