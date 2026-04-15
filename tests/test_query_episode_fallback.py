@@ -46,3 +46,70 @@ def test_episode_fallback_not_triggered_when_bundles_exist(tmp_path: object) -> 
     )
     ans = kb.query("What does Petra drive?")
     assert ans.trace.evidence_profile.episode_fallback_used is False
+
+
+def test_episode_fallback_triggers_when_claims_exist_but_answer_is_empty(tmp_path: object) -> None:
+    """Raw-episode fallback must still run when claims exist but answer_items are empty."""
+    kb = _kb(tmp_path)
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="t-like",
+        speaker="Melanie",
+        observed_at=NOW,
+        raw_text="Melanie: I like painting.",
+    )
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="t-sunrise",
+        speaker="Melanie",
+        observed_at=NOW,
+        session_date=datetime(2023, 5, 7, tzinfo=UTC),
+        raw_text="Melanie: Yeah, I painted that lake sunrise last year! It's special to me.",
+    )
+
+    ans = kb.query("When did Melanie paint a sunrise?")
+
+    assert ans.text == "No answer found."
+    assert ans.trace.evidence_profile.episode_fallback_used is True
+    assert "painted that lake sunrise last year" in ans.evidence_text
+    assert "2023-05-07" in ans.evidence_text
+
+
+def test_episode_search_does_not_drop_older_exact_match(tmp_path: object) -> None:
+    """Older exact raw-episode matches must survive newer fuzzy entity matches."""
+    storage = SQLiteStorage(db_path=str(tmp_path / "t.db"))  # type: ignore[operator]
+    kb = KnowledgeBase(agent_id="a", storage=storage)
+
+    for i in range(205):
+        kb.ingest_episode(
+            session_id="s",
+            turn_id=f"recent-{i}",
+            speaker="Melanie",
+            observed_at=NOW,
+            session_date=datetime(2024, 1, 1, tzinfo=UTC),
+            raw_text=(
+                "Melanie: Painting landscapes and still life is my favorite! "
+                f"Here's painting number {i}."
+            ),
+            materialize=False,
+        )
+
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="older-exact",
+        speaker="Melanie",
+        observed_at=NOW,
+        session_date=datetime(2023, 5, 7, tzinfo=UTC),
+        raw_text="Melanie: Yeah, I painted that lake sunrise last year! It's special to me.",
+        materialize=False,
+    )
+
+    hits = storage.search_episodes_by_entities(
+        "a",
+        ["Melanie"],
+        query="When did Melanie paint a sunrise?",
+        top_k=5,
+    )
+
+    assert hits
+    assert "painted that lake sunrise last year" in hits[0].raw_text

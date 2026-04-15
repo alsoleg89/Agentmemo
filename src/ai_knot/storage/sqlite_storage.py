@@ -643,7 +643,11 @@ class SQLiteStorage:
         query: str = "",
         top_k: int = 5,
     ) -> list[Any]:
-        """Substring/FTS lookup by entity mentions, ranked by query overlap."""
+        """Entity-filtered raw-episode search ranked by query relevance.
+
+        Important: do not pre-truncate candidates by recency before scoring.
+        Older exact matches must still beat newer fuzzy matches.
+        """
         if not entities:
             return []
         placeholders = " OR ".join(["raw_text LIKE ?"] * len(entities))
@@ -652,22 +656,61 @@ class SQLiteStorage:
             rows = conn.execute(
                 "SELECT id, agent_id, session_id, turn_id, speaker, observed_at, "
                 "session_date, raw_text, source_meta, parent_episode_id "
-                "FROM raw_episodes WHERE agent_id=? AND (" + placeholders + ") "
-                "ORDER BY COALESCE(session_date, observed_at) DESC LIMIT 200",
+                "FROM raw_episodes WHERE agent_id=? AND (" + placeholders + ")",
                 params,
             ).fetchall()
         episodes = [_row_to_episode(r) for r in rows]
+        if not episodes:
+            return []
+
+        def _recency(ep: Any) -> Any:
+            return ep.session_date or ep.observed_at
+
+        if not query:
+            return sorted(episodes, key=_recency, reverse=True)[:top_k]
+
+        from collections import Counter
+        from math import log
+
         from ai_knot.tokenizer import tokenize
 
-        q_tokens = set(tokenize(query)) if query else set()
+        q_tokens = tokenize(query)
+        if not q_tokens:
+            return sorted(episodes, key=_recency, reverse=True)[:top_k]
 
-        def score(ep: Any) -> tuple[int, Any]:
-            text_tokens = set(tokenize(ep.raw_text))
-            overlap = len(q_tokens & text_tokens) if q_tokens else 0
-            recency = ep.session_date or ep.observed_at
-            return (overlap, recency)
+        tokenized_docs = [tokenize(ep.raw_text) for ep in episodes]
+        n_docs = len(tokenized_docs)
+        avg_doc_len = sum(len(doc) for doc in tokenized_docs) / max(1, n_docs)
 
-        return sorted(episodes, key=score, reverse=True)[:top_k]
+        doc_freq: Counter[str] = Counter()
+        for doc in tokenized_docs:
+            for tok in set(doc):
+                doc_freq[tok] += 1
+
+        k1 = 1.5
+        b = 0.75
+
+        def _bm25_score(doc_tokens: list[str]) -> float:
+            if not doc_tokens:
+                return 0.0
+            tf = Counter(doc_tokens)
+            doc_len = len(doc_tokens)
+            score = 0.0
+            for tok in q_tokens:
+                freq = tf.get(tok, 0)
+                if freq <= 0:
+                    continue
+                idf = log((n_docs - doc_freq[tok] + 0.5) / (doc_freq[tok] + 0.5) + 1.0)
+                norm = freq + k1 * (1.0 - b + b * (doc_len / max(1.0, avg_doc_len)))
+                score += idf * (freq * (k1 + 1.0)) / norm
+            return score
+
+        ranked = sorted(
+            zip(episodes, tokenized_docs, strict=False),
+            key=lambda pair: (_bm25_score(pair[1]), _recency(pair[0])),
+            reverse=True,
+        )
+        return [ep for ep, _doc in ranked[:top_k]]
 
     # ------------------------------------------------------------------ #
     # ClaimStore (v2)

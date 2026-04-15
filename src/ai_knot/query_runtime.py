@@ -85,18 +85,8 @@ def execute_query(
     active_only = contract.time_axis in (TimeAxis.CURRENT, TimeAxis.NONE)
     claims = _sr.expand_claims(storage, agent_id, bundles, active_only=active_only)
 
-    # 4b. Episode fallback: if no claims and entities known, search raw episodes.
-    episode_fallback_ids: list[str] = []
-    if not claims and frame.focus_entities:
-        search_fn = getattr(storage, "search_episodes_by_entities", None)
-        if search_fn is not None:
-            eps = search_fn(agent_id, frame.focus_entities, query=question, top_k=5)
-            episode_fallback_ids = [e.id for e in eps]
-
     # 5. Build evidence profile.
     profile = _build_evidence_profile(claims, bundles, contract, frame, question, fallback_used)
-    if episode_fallback_ids:
-        profile = replace(profile, episode_fallback_used=True)
 
     # 6. Choose strategy.
     strategy = choose_strategy(frame, contract, profile)
@@ -107,11 +97,25 @@ def execute_query(
         claims, bundles, contract, profile, now, renderer
     )
 
+    # 7b. Raw-episode fallback for evidence_text.
+    #
+    # We also trigger this when claims exist but did not produce answer_items:
+    # the materialized plane may be too sparse for structured answering, while
+    # raw episodes still contain the exact evidence needed by downstream LLMs.
+    episode_search_ids: list[str] = []
+    if frame.focus_entities and (not claims or not answer_items):
+        search_fn = getattr(storage, "search_episodes_by_entities", None)
+        if search_fn is not None:
+            eps = search_fn(agent_id, frame.focus_entities, query=question, top_k=5)
+            episode_search_ids = [e.id for e in eps]
+            if episode_search_ids:
+                profile = replace(profile, episode_fallback_used=True)
+
     # 8. Render text.
     text = _render_text(answer_items, contract)
 
     # 8b. Build evidence_text for downstream LLM context.
-    ep_ids = _collect_evidence_episode_ids(answer_items, claims, episode_fallback_ids)
+    ep_ids = _collect_evidence_episode_ids(answer_items, claims, episode_search_ids)
     evidence_text = _render_evidence_context(storage, agent_id, ep_ids)
 
     # 9. Build trace.
@@ -239,10 +243,10 @@ def _render_text(items: list[AnswerItem], contract: AnswerContract) -> str:
 def _collect_evidence_episode_ids(
     items: list[AnswerItem],
     claims: list[AtomicClaim],
-    episode_fallback_ids: list[str] | None = None,
+    episode_search_ids: list[str] | None = None,
     cap: int = 5,
 ) -> list[str]:
-    """Unique episode ids in retrieval order: items → claims → fallback."""
+    """Unique episode ids in retrieval order: raw-search → items → claims."""
     seen: set[str] = set()
     out: list[str] = []
 
@@ -253,6 +257,10 @@ def _collect_evidence_episode_ids(
             return len(out) >= cap
         return False
 
+    if episode_search_ids:
+        for eid in episode_search_ids:
+            if _add(eid):
+                return out
     for it in items:
         for eid in it.source_episode_ids:
             if _add(eid):
@@ -260,10 +268,6 @@ def _collect_evidence_episode_ids(
     for c in claims:
         if _add(c.source_episode_id):
             return out
-    if episode_fallback_ids:
-        for eid in episode_fallback_ids:
-            if _add(eid):
-                return out
     return out
 
 
