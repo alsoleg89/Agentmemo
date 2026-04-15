@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ai_knot.types import Fact, SlotDelta
 
@@ -184,7 +184,7 @@ class RawEpisodeStore(Protocol):
         *,
         query: str = "",
         top_k: int = 5,
-    ) -> list[RawEpisode]:
+    ) -> list[Any]:
         """Optional: substring/FTS lookup by entity mentions, ranked by query overlap."""
         ...
 

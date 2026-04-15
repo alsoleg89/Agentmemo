@@ -99,18 +99,33 @@ def execute_query(
 
     # 7b. Raw-episode search for evidence_text enrichment.
     #
-    # Always runs when focus_entities are known.  candidate_rank and other
-    # operators produce answer_items from atomic_claims whose value_text
-    # fragments are too coarse to reconstruct a full answer — the raw episodes
-    # that sourced those claims carry the actual evidence the LLM needs.
-    # _collect_evidence_episode_ids places raw-search ids FIRST so the LLM
-    # context is dominated by full episode texts, not short claim fragments.
+    # Always runs when focus_entities are known.  Each hit is expanded to a
+    # 3-turn window (prev → center → next) so the answer-model LLM sees full
+    # conversational context, not just the matching turn.  Cap: ≤ 8 unique
+    # episode ids (covers ~5 overlapping windows before context budget is hit).
+    # _collect_evidence_episode_ids places raw-search ids FIRST.
     episode_search_ids: list[str] = []
     if frame.focus_entities:
         search_fn = getattr(storage, "search_episodes_by_entities", None)
         if search_fn is not None:
             eps = search_fn(agent_id, frame.focus_entities, query=question, top_k=5)
-            episode_search_ids = [e.id for e in eps]
+            # Expand each hit to a 3-turn window: prev → center → next (dedupe, cap 8).
+            seen: set[str] = set()
+            window_ids: list[str] = []
+            for hit in eps:
+                for eid in (
+                    getattr(hit, "prev_id", None),
+                    hit.id,
+                    getattr(hit, "next_id", None),
+                ):
+                    if eid is not None and eid not in seen:
+                        seen.add(eid)
+                        window_ids.append(eid)
+                        if len(window_ids) >= 8:
+                            break
+                if len(window_ids) >= 8:
+                    break
+            episode_search_ids = window_ids
             if episode_search_ids:
                 profile = replace(profile, episode_fallback_used=True)
 

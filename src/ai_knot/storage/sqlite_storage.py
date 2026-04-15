@@ -7,6 +7,7 @@ import logging
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass as _dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,21 @@ from ai_knot.storage.base import parse_datetime as _parse_datetime
 from ai_knot.types import Fact, MemoryType, MESIState, SlotDelta
 
 logger = logging.getLogger(__name__)
+
+
+@_dataclass
+class EpisodeHit:
+    """Scored search hit from search_episodes_by_entities.
+
+    .id and .raw_text mirror the centre episode for backward compatibility
+    with existing callers (query_runtime.py uses e.id; tests use hits[0].raw_text).
+    """
+
+    id: str  # centre episode id
+    raw_text: str  # centre episode raw_text
+    prev_id: str | None
+    next_id: str | None
+
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -645,6 +661,10 @@ class SQLiteStorage:
     ) -> list[Any]:
         """Entity-filtered raw-episode search ranked by query relevance.
 
+        Uses a 3-turn sliding window for BM25 scoring: each candidate is scored
+        against (prev.raw_text + " " + centre.raw_text + " " + next.raw_text),
+        giving cross-turn signal for answers that span adjacent turns.
+
         Important: do not pre-truncate candidates by recency before scoring.
         Older exact matches must still beat newer fuzzy matches.
         """
@@ -663,11 +683,76 @@ class SQLiteStorage:
         if not episodes:
             return []
 
+        # ------------------------------------------------------------------
+        # Build session order for 3-turn window
+        # ------------------------------------------------------------------
+        session_ids = {ep.session_id for ep in episodes}
+
+        def _turn_index(turn_id: str) -> int:
+            try:
+                return int(turn_id.rsplit("-", 1)[-1])
+            except (ValueError, IndexError):
+                return 0
+
+        # session_ordered: session_id -> [(ep_id, raw_text), ...] sorted by
+        # (observed_at, turn_index)
+        session_ordered: dict[str, list[tuple[str, str]]] = {}
+        with self._conn() as conn:
+            for sid in session_ids:
+                sess_rows = conn.execute(
+                    "SELECT id, raw_text, observed_at, turn_id "
+                    "FROM raw_episodes WHERE agent_id=? AND session_id=?",
+                    (agent_id, sid),
+                ).fetchall()
+                sorted_rows = sorted(
+                    sess_rows,
+                    key=lambda r: (r[2], _turn_index(r[3])),
+                )
+                session_ordered[sid] = [(r[0], r[1]) for r in sorted_rows]
+
+        # neighbour lookup: ep_id -> (prev_id | None, next_id | None)
+        neighbours: dict[str, tuple[str | None, str | None]] = {}
+        for _sid, ordered in session_ordered.items():
+            last = len(ordered) - 1
+            for pos, (ep_id, _) in enumerate(ordered):
+                prev_id = ordered[pos - 1][0] if pos > 0 else None
+                next_id = ordered[pos + 1][0] if pos < last else None
+                neighbours[ep_id] = (prev_id, next_id)
+
+        # window text per candidate episode.  Centre raw_text is included
+        # twice so that tokens unique to the centre outweigh tokens that
+        # appear only in a neighbour, preserving the existing ranking for
+        # episodes that already match the query on their own text.
+        def _window_text(ep: Any) -> str:
+            sid = ep.session_id
+            ordered = session_ordered.get(sid)
+            center = str(ep.raw_text)
+            if not ordered:
+                return center
+            pos_map = {eid: i for i, (eid, _) in enumerate(ordered)}
+            pos = pos_map.get(ep.id)
+            if pos is None:
+                return center
+            last = len(ordered) - 1
+            prev_text = str(ordered[pos - 1][1]) if pos > 0 else ""
+            next_text = str(ordered[pos + 1][1]) if pos < last else ""
+            return (center + " " + prev_text + " " + center + " " + next_text).strip()
+
         def _recency(ep: Any) -> Any:
             return ep.session_date or ep.observed_at
 
+        def _make_hit(ep: Any) -> EpisodeHit:
+            prev_id, next_id = neighbours.get(ep.id, (None, None))
+            return EpisodeHit(
+                id=ep.id,
+                raw_text=ep.raw_text,
+                prev_id=prev_id,
+                next_id=next_id,
+            )
+
         if not query:
-            return sorted(episodes, key=_recency, reverse=True)[:top_k]
+            top = sorted(episodes, key=_recency, reverse=True)[:top_k]
+            return [_make_hit(ep) for ep in top]
 
         from collections import Counter
         from math import log
@@ -676,14 +761,15 @@ class SQLiteStorage:
 
         q_tokens = tokenize(query)
         if not q_tokens:
-            return sorted(episodes, key=_recency, reverse=True)[:top_k]
+            top = sorted(episodes, key=_recency, reverse=True)[:top_k]
+            return [_make_hit(ep) for ep in top]
 
-        tokenized_docs = [tokenize(ep.raw_text) for ep in episodes]
-        n_docs = len(tokenized_docs)
-        avg_doc_len = sum(len(doc) for doc in tokenized_docs) / max(1, n_docs)
+        tokenized_windows = [tokenize(_window_text(ep)) for ep in episodes]
+        n_docs = len(tokenized_windows)
+        avg_doc_len = sum(len(doc) for doc in tokenized_windows) / max(1, n_docs)
 
         doc_freq: Counter[str] = Counter()
-        for doc in tokenized_docs:
+        for doc in tokenized_windows:
             for tok in set(doc):
                 doc_freq[tok] += 1
 
@@ -706,11 +792,11 @@ class SQLiteStorage:
             return score
 
         ranked = sorted(
-            zip(episodes, tokenized_docs, strict=False),
+            zip(episodes, tokenized_windows, strict=False),
             key=lambda pair: (_bm25_score(pair[1]), _recency(pair[0])),
             reverse=True,
         )
-        return [ep for ep, _doc in ranked[:top_k]]
+        return [_make_hit(ep) for ep, _win in ranked[:top_k]]
 
     # ------------------------------------------------------------------ #
     # ClaimStore (v2)

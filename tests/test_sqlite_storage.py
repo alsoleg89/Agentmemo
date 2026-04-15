@@ -202,3 +202,59 @@ class TestSQLitePersistence:
 
         assert len(loaded) == 1
         assert loaded[0].content == "persistent"
+
+
+def test_search_episodes_window_ranks_cross_turn_match(tmp_path: object) -> None:
+    """3-turn window BM25 must rank centre episode first when answer tokens span adjacent turns.
+
+    Turn 0 contains context only; turn 1 contains the answer token "Zephyra";
+    turn 2 contains noise. The query asks for "Zephyra".  Without windowing,
+    turn 1 wins on its own anyway — but the hit must carry prev_id (turn 0)
+    and next_id (turn 2) so the runtime can enrich evidence_text with neighbours.
+    """
+    from datetime import UTC, datetime
+
+    from ai_knot.storage.sqlite_storage import EpisodeHit, SQLiteStorage
+
+    storage = SQLiteStorage(db_path=str(tmp_path / "t.db"))  # type: ignore[operator]
+    t0 = datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC)
+    t1 = datetime(2024, 1, 1, 10, 1, 0, tzinfo=UTC)
+    t2 = datetime(2024, 1, 1, 10, 2, 0, tzinfo=UTC)
+
+    from ai_knot.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase(agent_id="a", storage=storage)
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="turn-0",
+        speaker="Alice",
+        observed_at=t0,
+        raw_text="Alice: We talked about many things.",
+    )
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="turn-1",
+        speaker="Bob",
+        observed_at=t1,
+        raw_text="Bob: Yes, Zephyra was the main topic.",
+    )
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="turn-2",
+        speaker="Alice",
+        observed_at=t2,
+        raw_text="Alice: Right, I remember that.",
+    )
+
+    hits = storage.search_episodes_by_entities(
+        "a", ["Alice", "Bob"], query="What is Zephyra?", top_k=3
+    )
+
+    assert hits, "expected at least one hit"
+    top = hits[0]
+    assert isinstance(top, EpisodeHit)
+    # Centre must be the turn that contains "Zephyra"
+    assert "Zephyra" in top.raw_text
+    # Neighbours must be populated (session has 3 episodes)
+    assert top.prev_id is not None, "prev_id must be set for a middle episode"
+    assert top.next_id is not None, "next_id must be set for a middle episode"

@@ -85,3 +85,51 @@ def test_no_double_speaker_prefix(tmp_path: object) -> None:
     # Whether or not evidence_text is non-empty, it must not double-prefix.
     if ans.evidence_text:
         assert "Elara: Elara:" not in ans.evidence_text
+
+
+def test_evidence_text_contains_neighbour_turns(tmp_path: object) -> None:
+    """evidence_text must include prev and next turns when answer spans 3 turns.
+
+    Seeds 3 turns in one session.  The matching turn (centre) contains the
+    key token; prev and next carry context.  After the 3-turn window fix,
+    all three turns must appear in evidence_text so the answer model can
+    reconstruct the full conversational context.
+    """
+    from datetime import UTC, datetime
+
+    kb = _kb(tmp_path)
+    t0 = datetime(2024, 3, 1, 10, 0, tzinfo=UTC)
+    t1 = datetime(2024, 3, 1, 10, 1, tzinfo=UTC)
+    t2 = datetime(2024, 3, 1, 10, 2, tzinfo=UTC)
+
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="turn-0",
+        speaker="Alice",
+        observed_at=t0,
+        raw_text="Alice: We talked about the Novalux project.",
+        materialize=False,
+    )
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="turn-1",
+        speaker="Bob",
+        observed_at=t1,
+        raw_text="Bob: Yes, Novalux launched successfully.",
+        materialize=False,
+    )
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="turn-2",
+        speaker="Alice",
+        observed_at=t2,
+        raw_text="Alice: I was there for the launch event.",
+        materialize=False,
+    )
+
+    ans = kb.query("What happened with Novalux?")
+
+    # All three turns must appear in evidence_text after 3-turn window expansion.
+    assert "Novalux project" in ans.evidence_text, "prev turn missing"
+    assert "launched successfully" in ans.evidence_text, "centre turn missing"
+    assert "launch event" in ans.evidence_text, "next turn missing"
