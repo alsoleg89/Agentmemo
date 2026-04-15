@@ -327,7 +327,8 @@ def _make_server(kb: KnowledgeBase) -> Any:
     def query_json(question: str, top_k: int = 60, render: str = "structured") -> str:
         """Contract-first query returning full QueryAnswer as JSON.
 
-        Returns structured payload: text, items (with confidence and provenance),
+        Returns structured payload: text, evidence_text (formatted episode block
+        ready for downstream LLM context), items (with confidence and provenance),
         and trace (strategy, evidence profile, latency).
 
         Args:

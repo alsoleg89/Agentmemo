@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import ai_knot.support_retrieval as _sr
@@ -84,8 +85,18 @@ def execute_query(
     active_only = contract.time_axis in (TimeAxis.CURRENT, TimeAxis.NONE)
     claims = _sr.expand_claims(storage, agent_id, bundles, active_only=active_only)
 
+    # 4b. Episode fallback: if no claims and entities known, search raw episodes.
+    episode_fallback_ids: list[str] = []
+    if not claims and frame.focus_entities:
+        search_fn = getattr(storage, "search_episodes_by_entities", None)
+        if search_fn is not None:
+            eps = search_fn(agent_id, frame.focus_entities, query=question, top_k=5)
+            episode_fallback_ids = [e.id for e in eps]
+
     # 5. Build evidence profile.
     profile = _build_evidence_profile(claims, bundles, contract, frame, question, fallback_used)
+    if episode_fallback_ids:
+        profile = replace(profile, episode_fallback_used=True)
 
     # 6. Choose strategy.
     strategy = choose_strategy(frame, contract, profile)
@@ -98,6 +109,10 @@ def execute_query(
 
     # 8. Render text.
     text = _render_text(answer_items, contract)
+
+    # 8b. Build evidence_text for downstream LLM context.
+    ep_ids = _collect_evidence_episode_ids(answer_items, claims, episode_fallback_ids)
+    evidence_text = _render_evidence_context(storage, agent_id, ep_ids)
 
     # 9. Build trace.
     latency_ms = (time.monotonic() - t0) * 1000.0
@@ -118,6 +133,7 @@ def execute_query(
         items=tuple(answer_items),
         confidence=confidence,
         trace=trace,
+        evidence_text=evidence_text,
     )
 
 
@@ -213,6 +229,82 @@ def _render_text(items: list[AnswerItem], contract: AnswerContract) -> str:
     if len(items) == 1:
         return items[0].value
     return "; ".join(i.value for i in items[:5])
+
+
+# ---------------------------------------------------------------------------
+# Evidence context helpers
+# ---------------------------------------------------------------------------
+
+
+def _collect_evidence_episode_ids(
+    items: list[AnswerItem],
+    claims: list[AtomicClaim],
+    episode_fallback_ids: list[str] | None = None,
+    cap: int = 5,
+) -> list[str]:
+    """Unique episode ids in retrieval order: items → claims → fallback."""
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _add(eid: str | None) -> bool:
+        if eid and eid not in seen:
+            seen.add(eid)
+            out.append(eid)
+            return len(out) >= cap
+        return False
+
+    for it in items:
+        for eid in it.source_episode_ids:
+            if _add(eid):
+                return out
+    for c in claims:
+        if _add(c.source_episode_id):
+            return out
+    if episode_fallback_ids:
+        for eid in episode_fallback_ids:
+            if _add(eid):
+                return out
+    return out
+
+
+def _render_evidence_context(
+    storage: object,
+    agent_id: str,
+    episode_ids: list[str],
+    top_k: int = 5,
+) -> str:
+    """Format episodes as '[N] [YYYY-MM-DD] Speaker: raw_text', newline-joined.
+
+    Rules:
+    - Date in ISO; missing date → no date brackets.
+    - Missing speaker → no speaker label.
+    - If raw_text already starts with 'Speaker:', do NOT double-prefix.
+    - Missing/not-found episode → silently skip.
+    """
+    parts: list[str] = []
+    n = 0
+    get_ep = getattr(storage, "get_episode", None)
+    if get_ep is None:
+        return ""
+    for eid in episode_ids[:top_k]:
+        ep = get_ep(agent_id, eid)
+        if ep is None:
+            continue
+        n += 1
+        date_part = ""
+        if ep.session_date is not None:
+            try:
+                date_part = f"[{ep.session_date.date().isoformat()}] "
+            except AttributeError:
+                # session_date might already be a date object
+                date_part = f"[{ep.session_date.isoformat()}] "
+        speaker = getattr(ep, "speaker", None)
+        raw = ep.raw_text
+        speaker_part = ""
+        if speaker and not raw.lstrip().startswith(f"{speaker}:"):
+            speaker_part = f"{speaker}: "
+        parts.append(f"[{n}] {date_part}{speaker_part}{raw}")
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

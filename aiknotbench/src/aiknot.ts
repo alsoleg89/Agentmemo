@@ -119,7 +119,7 @@ export class AiknotAdapter {
    */
   async recall(question: string): Promise<string> {
     const answer = await this.kb.query(question, { topK: this.topK });
-    return answer.text || "No answer found.";
+    return answer.evidence_text || answer.text || "No answer found.";
   }
 
   /** Gracefully shut down the underlying MCP subprocess. */
