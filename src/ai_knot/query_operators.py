@@ -346,11 +346,15 @@ def candidate_rank(
     if not support:
         return [], 0.0, ["no supporting claims"]
 
-    # Build expected slot keys from profile for slot_match bonus.
+    # Build slot keys from actually retrieved bundles, filtered by focus_entities.
     slot_keys: set[str] = set()
-    if profile.focus_relation:
-        for ent in profile.focus_entities:
-            slot_keys.add(f"{ent}::{profile.focus_relation}")
+    focus_ents = set(profile.focus_entities) if profile.focus_entities else None
+    for b in bundles:
+        if "::" not in b.topic:
+            continue
+        entity_part = b.topic.split("::", 1)[0]
+        if focus_ents is None or entity_part in focus_ents:
+            slot_keys.add(b.topic)
     q_tokens = set(profile.question_tokens)
 
     # Score: slot_match + question_relevance + salience*confidence + recency - contra penalty.
