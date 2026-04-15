@@ -267,10 +267,10 @@ class TestRelationExtractionFix:
             f"Expected 'Deborah' in focus_entities, got {frame.focus_entities}"
         )
 
-    def test_passed_away_normalized_to_pass(self):
+    def test_passed_away_normalized_to_passed_away(self):
         frame = analyze_query("When did Deborah's mother pass away?")
-        # "pass" or "die" depending on which verb token is seen first
-        assert frame.focus_relation in ("pass", "die", None), (
+        # Compound pattern "pass away" → "passed_away" (matches materializer's stored relation).
+        assert frame.focus_relation in ("passed_away", "pass", "die", None), (
             f"Unexpected relation {frame.focus_relation!r}"
         )
 

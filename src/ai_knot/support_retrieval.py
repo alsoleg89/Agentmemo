@@ -178,6 +178,12 @@ def apply_pending_dirty_keys(
     """Drain any pending dirty keys from materialization_meta and invalidate bundles.
 
     Returns the number of bundles invalidated.
+
+    Note: this function only DELETES matching bundles — it does NOT rebuild them.
+    Callers must rebuild via ``build_all_bundles`` + ``save_bundles`` if the slot
+    plane must remain populated after invalidation.  Prefer skipping this API
+    when bundles were already rebuilt at ingest time (the standard ingest path
+    clears dirty_keys_json immediately after saving bundles, making this a no-op).
     """
     import json
 
@@ -212,6 +218,22 @@ def apply_pending_dirty_keys(
     return cast(int, bs.invalidate_by_keys(agent_id, keys))
 
 
+# Maps a query-extracted focus_relation (canonical lemma) to the set of
+# compound relation names the materializer may have stored under that entity.
+# Keeps the fan-out small and mechanical — no guessing, no LLM.
+_RELATION_ALIASES: dict[str, tuple[str, ...]] = {
+    "find": ("finds_satisfying",),
+    "like": ("likes",),
+    "love": ("likes",),
+    "enjoy": ("likes",),
+    "hate": ("dislikes",),
+    "dislike": ("dislikes",),
+    "move": ("moved_to",),
+    "work": ("works_as",),
+    "pass": ("passed_away",),
+}
+
+
 def topics_for_entities(
     entities: tuple[str, ...],
     contract: AnswerContract | None = None,
@@ -220,13 +242,19 @@ def topics_for_entities(
 ) -> list[str]:
     """Convert focus entities to bundle topic strings.
 
-    When focus_relation is provided, "entity::relation" slot topics are
+    When focus_relation is provided, slot topics ("entity::relation") are
     prepended so that STATE_TIMELINE / RELATION_SUPPORT bundles are retrieved
-    first before entity-topic bundles.
+    first.  Compound-relation aliases are also expanded so that a query lemma
+    like "find" also searches for the stored relation "finds_satisfying".
     """
     topics: list[str] = []
     for entity in entities:
         if focus_relation:
+            # Fan out to alias relations first (most specific match), then the
+            # raw lemma form, then the bare entity topic.
+            aliases = _RELATION_ALIASES.get(focus_relation, ())
+            for alias in aliases:
+                topics.append(f"{entity}::{alias}")
             topics.append(f"{entity}::{focus_relation}")
         topics.append(entity)
     return list(dict.fromkeys(topics))  # deduplicate preserving order
@@ -249,16 +277,22 @@ def bundle_kinds_for_contract(
     if contract is None:
         return None
 
+    # Temporal takes precedence: EVENT/INTERVAL questions must include
+    # EVENT_NEIGHBORHOOD first — even when a focus relation is present.
+    if contract.time_axis in (TimeAxis.EVENT, TimeAxis.INTERVAL):
+        if focus_relation:
+            return [
+                BundleKind.EVENT_NEIGHBORHOOD,
+                BundleKind.STATE_TIMELINE,
+                BundleKind.RELATION_SUPPORT,
+            ]
+        return [BundleKind.EVENT_NEIGHBORHOOD, BundleKind.STATE_TIMELINE]
+
     # Slot-first: when we have a focus relation, prefer STATE_TIMELINE and
     # RELATION_SUPPORT so the slot bundle is retrieved before entity-topic.
     if focus_relation:
         return [BundleKind.STATE_TIMELINE, BundleKind.RELATION_SUPPORT, BundleKind.ENTITY_TOPIC]
 
-    # Temporal first: EVENT/INTERVAL questions need event-neighbourhood bundles,
-    # not entity-topic ones (previously SET check here was always truthy due to
-    # attribute-lookup bug on the enum value).
-    if contract.time_axis in (TimeAxis.EVENT, TimeAxis.INTERVAL):
-        return [BundleKind.EVENT_NEIGHBORHOOD, BundleKind.STATE_TIMELINE]
     if contract.answer_space is AnswerSpace.SET:
         # Aggregate over entity-topic bundles.
         return [BundleKind.ENTITY_TOPIC, BundleKind.STATE_TIMELINE]

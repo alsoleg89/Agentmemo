@@ -266,3 +266,106 @@ class TestSpeakerPrefixExtraction:
             assert c.subject not in ("I", "Do", "What", "You"), (
                 f"Pronoun/opener {c.subject!r} must not be a claim subject"
             )
+
+
+# ---------------------------------------------------------------------------
+# §4 — Extended garbage filter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Do you like it?",
+        "Any chance you'll come?",
+        "Maybe next week.",
+        "I'd love that.",
+        "I'm here.",
+        "That's cool.",
+        "Ok.",
+        "Nice one.",
+        "You going?",
+        "Got it.",
+        "Alright.",
+        "Cool idea.",
+        "Sounds good.",
+    ],
+)
+def test_garbage_sentences_produce_no_claims(text: str) -> None:
+    """Extended garbage filter must reject short fillers, contractions, ?-sentences."""
+    ep = _ep(text, turn_id=f"g:{text[:15]}")
+    claims = materialize_episode(ep)
+    assert claims == [], f"Garbage text {text!r} should produce no claims, got {len(claims)}"
+
+
+# ---------------------------------------------------------------------------
+# §5 — Speaker-aware action extraction
+# ---------------------------------------------------------------------------
+
+
+class TestSpeakerFirstPerson:
+    def _ep_speaker(self, raw_text: str, turn_id: str = "t") -> RawEpisode:
+        ep_id = make_episode_id("agent", "sess", turn_id)
+        return RawEpisode(
+            id=ep_id,
+            agent_id="agent",
+            session_id="sess",
+            turn_id=turn_id,
+            speaker="user",
+            observed_at=NOW,
+            session_date=None,
+            raw_text=raw_text,
+            source_meta={},
+            parent_episode_id=None,
+        )
+
+    def test_fp_drives_with_speaker(self) -> None:
+        """'Evan: I drive a Tacoma' → STATE drives with subject=Evan."""
+        ep = self._ep_speaker("Evan: I drive a Tacoma.", "t-drives")
+        claims = materialize_episode(ep)
+        drives = [c for c in claims if c.relation == "drives" and c.subject == "Evan"]
+        assert drives, (
+            f"Expected drives claim for Evan, got: "
+            f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+        )
+        assert "tacoma" in drives[0].value_text.lower()
+
+    def test_fp_works_at_with_speaker(self) -> None:
+        """'Dave: I joined Acme last year' → RELATION works_at with subject=Dave."""
+        ep = self._ep_speaker("Dave: I joined Acme last year.", "t-work")
+        claims = materialize_episode(ep)
+        work = [c for c in claims if c.relation == "works_at" and c.subject == "Dave"]
+        assert work, (
+            f"Expected works_at claim for Dave, got: "
+            f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+        )
+
+    def test_fp_moved_to_with_speaker(self) -> None:
+        """'Alice: I moved to Berlin last spring' → TRANSITION moved_to with subject=Alice."""
+        ep = self._ep_speaker("Alice: I moved to Berlin last spring.", "t-move")
+        claims = materialize_episode(ep)
+        moved = [c for c in claims if c.relation == "moved_to" and c.subject == "Alice"]
+        assert moved, (
+            f"Expected moved_to claim for Alice, got: "
+            f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+        )
+        assert "berlin" in moved[0].value_text.lower()
+
+    def test_fp_started_with_speaker(self) -> None:
+        """'Bob: I started researching machine learning' → STATE started with subject=Bob."""
+        ep = self._ep_speaker("Bob: I started researching machine learning.", "t-started")
+        claims = materialize_episode(ep)
+        started = [c for c in claims if c.relation == "started" and c.subject == "Bob"]
+        assert started, (
+            f"Expected started claim for Bob, got: "
+            f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+        )
+
+    def test_fp_action_no_speaker_no_claim(self) -> None:
+        """Without a speaker prefix, 'I drive a Tacoma' must not produce a drives claim."""
+        ep = _ep("I drive a Tacoma.")
+        claims = materialize_episode(ep)
+        drives = [c for c in claims if c.relation == "drives"]
+        assert not drives, (
+            "Without named speaker, first-person action must not produce a drives claim"
+        )

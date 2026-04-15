@@ -221,7 +221,13 @@ def _render_text(items: list[AnswerItem], contract: AnswerContract) -> str:
 
 
 def _drain_dirty_keys(storage: object, agent_id: str) -> None:
-    """Read pending dirty_keys_json from meta and invalidate matching bundles."""
+    """Read pending dirty_keys_json from meta, invalidate matching bundles, then rebuild.
+
+    This path is only exercised for legacy callers that wrote dirty_keys_json
+    without rebuilding bundles at write time (e.g. external claim-only writes).
+    The standard ``ingest_episode`` / ``ingest_episodes`` paths clear dirty_keys_json
+    immediately after saving bundles, so this function is a no-op for them.
+    """
     if not hasattr(storage, "load_materialization_meta"):
         return
     meta = storage.load_materialization_meta(agent_id)
@@ -230,6 +236,30 @@ def _drain_dirty_keys(storage: object, agent_id: str) -> None:
         return
 
     invalidated = _sr.apply_pending_dirty_keys(storage, agent_id, dirty_json)
+
+    if invalidated > 0 and hasattr(storage, "save_bundles") and hasattr(storage, "load_claims"):
+        # Rebuild bundles for the affected subjects so the slot plane is not left empty.
+        import json as _json
+
+        from ai_knot.materialization import MATERIALIZATION_VERSION
+        from ai_knot.support_bundles import build_all_bundles
+
+        try:
+            raw_keys = _json.loads(dirty_json)
+        except (ValueError, TypeError):
+            raw_keys = []
+        subjects = list(dict.fromkeys(k["subject"] for k in raw_keys if k.get("subject")))
+        if subjects:
+            full_claims = storage.load_claims(agent_id, subjects=subjects, active_only=False)
+            if full_claims:
+                rebuilt_bundles, rebuilt_members = build_all_bundles(
+                    full_claims,
+                    [],
+                    agent_id=agent_id,
+                    materialization_version=MATERIALIZATION_VERSION,
+                )
+                if rebuilt_bundles:
+                    storage.save_bundles(agent_id, rebuilt_bundles, rebuilt_members)
 
     if invalidated > 0 and hasattr(storage, "save_materialization_meta"):
         # Clear dirty keys after draining.

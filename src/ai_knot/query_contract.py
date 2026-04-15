@@ -368,6 +368,21 @@ _VERB_LEMMA_MAP: dict[str, str] = {
     "used": "use",
 }
 
+# Compound-phrase patterns that map a multi-token question fragment to the
+# materializer's compound relation name.  Checked before single-token lemma
+# lookup so that "find … satisfying" wins over plain "find".
+_COMPOUND_RELATION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:find|finds|found|finding)\b.*\bsatisfying\b", re.I), "finds_satisfying"),
+    (
+        re.compile(r"\b(?:love|loves|like|likes|enjoy|enjoys|adore|adores|prefer|prefers)\b", re.I),
+        "likes",
+    ),
+    (re.compile(r"\b(?:hate|hates|dislike|dislikes)\b", re.I), "dislikes"),
+    (re.compile(r"\b(?:move|moves|moved|moving|relocate|relocated)\b\s+to\b", re.I), "moved_to"),
+    (re.compile(r"\b(?:work|works|worked|working)\b\s+as\b", re.I), "works_as"),
+    (re.compile(r"\b(?:pass|passes|passed|passing)\b\s+away\b", re.I), "passed_away"),
+]
+
 
 def _tokenize_lower(text: str) -> list[str]:
     return re.findall(r"[a-z']+", text.lower())
@@ -511,10 +526,14 @@ def _derive_evidence_regime(answer_space: AnswerSpace) -> EvidenceRegime:
 def _extract_focus_relation(question: str, entities: list[str]) -> str | None:
     """Try to extract a verb-like focus relation from the question.
 
-    Normalizes inflected verb forms (drives → drive, restoring → restore)
-    via _VERB_LEMMA_MAP before checking against _RELATION_VERBS.
-    Returns the canonical lemma form.
+    Checks compound-phrase patterns first (e.g. "find … satisfying" → "finds_satisfying"),
+    then normalizes inflected verb forms via _VERB_LEMMA_MAP, then falls back to
+    _RELATION_VERBS for single-token lemmas.
+    Returns the canonical compound or lemma form.
     """
+    for pattern, compound_relation in _COMPOUND_RELATION_PATTERNS:
+        if pattern.search(question):
+            return compound_relation
     tokens = _tokenize_lower(question)
     for t in tokens:
         lemma = _VERB_LEMMA_MAP.get(t)

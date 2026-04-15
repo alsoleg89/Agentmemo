@@ -1381,7 +1381,6 @@ class KnowledgeBase(_LearningMixin):
         """
         from ai_knot.materialization import (
             MATERIALIZATION_VERSION,
-            dirty_keys_for_claims,
             materialize_episode,
         )
         from ai_knot.query_types import RawEpisode, make_episode_id
@@ -1413,29 +1412,6 @@ class KnowledgeBase(_LearningMixin):
             claims = materialize_episode(episode)
             if claims and isinstance(self._storage, ClaimStore):
                 self._storage.replace_claims_for_episodes(self._agent_id, [episode.id], claims)
-                dirty = dirty_keys_for_claims(claims)
-                if dirty and isinstance(self._storage, MaterializationMetaStore):
-                    import json as _json
-
-                    raw_meta = self._storage.load_materialization_meta(self._agent_id)
-                    meta = cast(dict[str, Any], raw_meta)
-                    old_keys = _json.loads(meta.get("dirty_keys_json", "[]"))
-                    new_keys = old_keys + [
-                        {
-                            "subject": k.subject,
-                            "relation": k.relation,
-                            "bundle_kind": k.bundle_kind.value if k.bundle_kind else None,
-                            "topic": k.topic,
-                        }
-                        for k in dirty
-                    ]
-                    self._storage.save_materialization_meta(
-                        self._agent_id,
-                        schema_version=int(meta.get("schema_version", 2)),
-                        materialization_version=MATERIALIZATION_VERSION,
-                        dirty_keys_json=_json.dumps(new_keys),
-                        rebuild_status=str(meta.get("rebuild_status", "ready")),
-                    )
 
             if claims and hasattr(self._storage, "save_bundles"):
                 from ai_knot.support_bundles import build_all_bundles
@@ -1462,6 +1438,20 @@ class KnowledgeBase(_LearningMixin):
                 if ep_bundles:
                     self._storage.save_bundles(self._agent_id, ep_bundles, ep_memberships)
 
+            # Bundles are now fully rebuilt from the complete claim-store — clear any
+            # pending dirty keys so that _drain_dirty_keys() in the query path is a
+            # no-op rather than deleting the freshly-built slot bundles.
+            if claims and isinstance(self._storage, MaterializationMetaStore):
+                raw_meta = self._storage.load_materialization_meta(self._agent_id)
+                meta = cast(dict[str, Any], raw_meta)
+                self._storage.save_materialization_meta(
+                    self._agent_id,
+                    schema_version=int(meta.get("schema_version", 2)),
+                    materialization_version=MATERIALIZATION_VERSION,
+                    dirty_keys_json="[]",
+                    rebuild_status=str(meta.get("rebuild_status", "ready")),
+                )
+
         return episode
 
     def ingest_episodes(self, episodes: Any, *, materialize: bool = True) -> None:
@@ -1473,7 +1463,6 @@ class KnowledgeBase(_LearningMixin):
         """
         from ai_knot.materialization import (
             MATERIALIZATION_VERSION,
-            dirty_keys_for_claims,
             rebuild_claims_from_raw,
         )
 
@@ -1505,29 +1494,6 @@ class KnowledgeBase(_LearningMixin):
                 ep_ids = [e.id for e in eps]
                 self._storage.replace_claims_for_episodes(self._agent_id, ep_ids, [])
                 self._storage.save_claims(self._agent_id, claims)
-                dirty = dirty_keys_for_claims(claims)
-                if dirty and isinstance(self._storage, MaterializationMetaStore):
-                    import json as _json
-
-                    raw_meta = self._storage.load_materialization_meta(self._agent_id)
-                    meta = cast(dict[str, Any], raw_meta)
-                    old_keys = _json.loads(meta.get("dirty_keys_json", "[]"))
-                    new_keys = old_keys + [
-                        {
-                            "subject": k.subject,
-                            "relation": k.relation,
-                            "bundle_kind": k.bundle_kind.value if k.bundle_kind else None,
-                            "topic": k.topic,
-                        }
-                        for k in dirty
-                    ]
-                    self._storage.save_materialization_meta(
-                        self._agent_id,
-                        schema_version=int(meta.get("schema_version", 2)),
-                        materialization_version=MATERIALIZATION_VERSION,
-                        dirty_keys_json=_json.dumps(new_keys),
-                        rebuild_status=str(meta.get("rebuild_status", "ready")),
-                    )
 
                 if hasattr(self._storage, "save_bundles"):
                     from ai_knot.support_bundles import build_all_bundles
@@ -1543,6 +1509,20 @@ class KnowledgeBase(_LearningMixin):
                     )
                     if batch_bundles:
                         self._storage.save_bundles(self._agent_id, batch_bundles, batch_memberships)
+
+                # Bundles are fully rebuilt — clear any pending dirty keys so that
+                # _drain_dirty_keys() in the query path is a no-op and does not
+                # delete the freshly-built slot bundles.
+                if isinstance(self._storage, MaterializationMetaStore):
+                    raw_meta = self._storage.load_materialization_meta(self._agent_id)
+                    meta = cast(dict[str, Any], raw_meta)
+                    self._storage.save_materialization_meta(
+                        self._agent_id,
+                        schema_version=int(meta.get("schema_version", 2)),
+                        materialization_version=MATERIALIZATION_VERSION,
+                        dirty_keys_json="[]",
+                        rebuild_status=str(meta.get("rebuild_status", "ready")),
+                    )
 
     def query(
         self,

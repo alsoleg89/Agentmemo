@@ -323,3 +323,65 @@ def test_p6_reingest_same_turn_replaces_claims(tmp_path: object) -> None:
     values = " ".join(c.value_text for c in claims if c.subject == "Alice").lower()
     assert "manager" in values, "new claim must be present after re-ingest"
     assert "software engineer" not in values, "stale claim must be gone after re-ingest"
+
+
+# ---------------------------------------------------------------------------
+# §1 — Slot bundles must survive the first query (_drain_dirty_keys race)
+# ---------------------------------------------------------------------------
+
+
+def test_slot_bundle_survives_first_query(tmp_path: object) -> None:
+    """Slot bundle built at ingest must not be deleted by _drain_dirty_keys on
+    the first query call.  Previously, ingest wrote dirty_keys_json and the first
+    query drained those keys — deleting the freshly-built STATE_TIMELINE bundle
+    without rebuilding it, so slot_bundle_hits dropped to 0 permanently."""
+    kb = _kb(tmp_path)
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="t0",
+        speaker="Dave",
+        observed_at=NOW,
+        raw_text="Dave: I love restoring old cars.",
+    )
+    # Before any query the slot bundle must exist.
+    before = kb._storage.load_bundles_by_topic("a", ["Dave::likes"])
+    assert before, "slot bundle Dave::likes must exist after ingest"
+
+    # Run a query — previously this destroyed the slot bundle via dirty-keys drain.
+    kb.query("What does Dave love?", now=NOW)
+
+    after = kb._storage.load_bundles_by_topic("a", ["Dave::likes"])
+    assert after, (
+        "slot bundle Dave::likes must survive _drain_dirty_keys on first query "
+        "(dirty_keys_json must be cleared at ingest time, not written)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §3 — Temporal axis must take precedence over focus_relation in bundle routing
+# ---------------------------------------------------------------------------
+
+
+def test_p3_temporal_precedes_relation() -> None:
+    """bundle_kinds_for_contract must put EVENT_NEIGHBORHOOD first even when
+    focus_relation is set — temporal questions need event-neighbourhood bundles."""
+    from ai_knot.query_types import (
+        AnswerContract,
+        AnswerSpace,
+        EvidenceRegime,
+        TimeAxis,
+        TruthMode,
+    )
+
+    c = AnswerContract(
+        answer_space=AnswerSpace.ENTITY,
+        truth_mode=TruthMode.DIRECT,
+        time_axis=TimeAxis.EVENT,
+        locality="point",
+        evidence_regime=EvidenceRegime.SINGLE,
+    )
+    kinds = bundle_kinds_for_contract(c, focus_relation="pass")
+    assert kinds is not None
+    assert kinds[0] is BundleKind.EVENT_NEIGHBORHOOD, (
+        "EVENT time_axis must place EVENT_NEIGHBORHOOD first, even with focus_relation"
+    )
