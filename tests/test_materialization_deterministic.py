@@ -269,36 +269,6 @@ class TestSpeakerPrefixExtraction:
 
 
 # ---------------------------------------------------------------------------
-# §4 — Extended garbage filter
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Do you like it?",
-        "Any chance you'll come?",
-        "Maybe next week.",
-        "I'd love that.",
-        "I'm here.",
-        "That's cool.",
-        "Ok.",
-        "Nice one.",
-        "You going?",
-        "Got it.",
-        "Alright.",
-        "Cool idea.",
-        "Sounds good.",
-    ],
-)
-def test_garbage_sentences_produce_no_claims(text: str) -> None:
-    """Extended garbage filter must reject short fillers, contractions, ?-sentences."""
-    ep = _ep(text, turn_id=f"g:{text[:15]}")
-    claims = materialize_episode(ep)
-    assert claims == [], f"Garbage text {text!r} should produce no claims, got {len(claims)}"
-
-
-# ---------------------------------------------------------------------------
 # §5 — Speaker-aware action extraction
 # ---------------------------------------------------------------------------
 

@@ -279,3 +279,12 @@ class TestRelationExtractionFix:
         assert frame.focus_relation == "research", (
             f"Expected 'research', got {frame.focus_relation!r}"
         )
+
+
+def test_what_is_alice_like_has_no_focus_relation() -> None:
+    assert analyze_query("What is Alice like?").focus_relation is None
+    assert analyze_query("What's the place like?").focus_relation is None
+
+
+def test_work_as_maps_to_role() -> None:
+    assert analyze_query("What does Alice work as?").focus_relation == "role"

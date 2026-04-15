@@ -180,7 +180,8 @@ _FP_SATISFYING_RE = re.compile(
     re.IGNORECASE,
 )
 _FP_SELF_STATE_RE = re.compile(
-    r"^I\s+(?:am|'m)\s+(.+?)\.?\s*$", re.IGNORECASE,
+    r"^I\s+(?:am|'m)\s+(.+?)\.?\s*$",
+    re.IGNORECASE,
 )
 
 # First-person action patterns (used when speaker is known).

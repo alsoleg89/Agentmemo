@@ -274,32 +274,34 @@ def test_fix1_incremental_ingest_preserves_bundle_members(tmp_path: object) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_fix4_slot_bundle_prevents_fallback(tmp_path: object) -> None:
-    """When a STATE_TIMELINE bundle exists for entity::relation, retrieval must
-    not fall back to BM25 (slot_bundle_hits must be > 0 in the profile)."""
+def test_slot_bundle_hit_for_drive_alias(tmp_path: object) -> None:
+    """After relation alias fix: drive query → slot bundle hit, no fallback."""
     kb = _kb(tmp_path)
-    # Ingest a claim that produces a STATE_TIMELINE bundle for Evan::drive.
-    # We have to use third-person "Evan drives a pickup truck" — but the
-    # materializer matches STATE_RE ("Evan is ...") or ROLE_RE ("Evan works as ...").
-    # Use a sentence that materializes with subject=Evan and relation that maps to drive.
-    # Since the materializer doesn't have a specific 'drive' pattern yet, use STATE.
     kb.ingest_episode(
         session_id="s",
-        turn_id="t0",
-        speaker="user",
+        turn_id="t",
+        speaker="Rovan",
         observed_at=NOW,
-        raw_text="Evan is the owner of a pickup truck.",
+        raw_text="Rovan: I drive a Vortex.",
     )
-    # Rebuild to ensure bundles are current.
-    kb.rebuild_materialized(force=True)
+    ans = kb.query("What does Rovan drive?")
+    assert ans.trace.evidence_profile.slot_bundle_hits >= 1
+    assert ans.trace.evidence_profile.fallback_used is False
 
-    # Query about Evan — should hit entity-topic bundle (not fall back).
-    ans = kb.query("What does Evan own?", now=NOW)
-    assert ans.trace is not None
-    # Profile may show slot_bundle_hits=0 here since we don't have entity::drive bundle.
-    # But the ENTITY_TOPIC bundle for "Evan" must exist and be used.
-    ep = ans.trace.evidence_profile
-    assert ep.n_support > 0, "Query must find claims about Evan without pure BM25 fallback"
+
+def test_slot_bundle_hit_for_works_at(tmp_path: object) -> None:
+    """After relation alias fix: work query → slot bundle hit, no fallback."""
+    kb = _kb(tmp_path)
+    kb.ingest_episode(
+        session_id="s",
+        turn_id="t",
+        speaker="Selva",
+        observed_at=NOW,
+        raw_text="Selva: I joined Nexovum.",
+    )
+    ans = kb.query("Where does Selva work?")
+    assert ans.trace.evidence_profile.slot_bundle_hits >= 1
+    assert ans.trace.evidence_profile.fallback_used is False
 
 
 def test_p6_reingest_same_turn_replaces_claims(tmp_path: object) -> None:
