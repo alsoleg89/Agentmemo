@@ -150,11 +150,21 @@ def fallback_claim_search(
     *,
     top_k: int = 60,
 ) -> list[AtomicClaim]:
-    """BM25 search over atomic_claims.value_text when bundle plane is empty.
+    """BM25 (or hybrid) search over atomic_claims when bundle plane is empty.
 
-    Uses the lightweight built-in BM25 kernel.
+    Delegates to search_claims_semantic when available (proper IDF BM25 +
+    optional cosine RRF). Falls back to lightweight overlap-TF BM25 otherwise.
     """
     cs = _get_claim_store(storage)
+
+    # Prefer the richer semantic search method (S5+).
+    if hasattr(cs, "search_claims_semantic"):
+        return cast(
+            list[AtomicClaim],
+            cs.search_claims_semantic(agent_id, question, top_k=top_k),
+        )
+
+    # Legacy overlap-TF fallback.
     if not hasattr(cs, "iter_value_text") or not hasattr(cs, "load_claims"):
         return []
 

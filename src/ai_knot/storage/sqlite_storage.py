@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import array
 import json
 import logging
+import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass as _dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +18,29 @@ from ai_knot.storage.base import parse_datetime as _parse_datetime
 from ai_knot.types import Fact, MemoryType, MESIState, SlotDelta
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_vec(vec: list[float]) -> bytes:
+    """Serialize a float32 vector to bytes (array module)."""
+    return array.array("f", vec).tobytes()
+
+
+def _deserialize_vec(blob: bytes) -> list[float]:
+    """Deserialize bytes back to a list[float]."""
+    arr: array.array[float] = array.array("f")
+    arr.frombytes(blob)
+    return list(arr)
+
+
+@_dataclass
+class EpisodeHit:
+    """Scored search hit from search_episodes_by_entities."""
+
+    id: str  # centre episode id
+    raw_text: str  # centre episode raw_text
+    prev_id: str | None
+    next_id: str | None
+
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -95,8 +121,34 @@ class SQLiteStorage:
     more robustness than YAML files but don't need a separate DB server.
     """
 
-    def __init__(self, db_path: str = ".ai_knot/ai_knot.db") -> None:
+    #: v2 query-plane capability flag
+    supports_v2_query_planes: bool = True
+
+    def __init__(
+        self,
+        db_path: str = ".ai_knot/ai_knot.db",
+        *,
+        embed_url: str | None = None,
+        embed_model: str | None = None,
+        embed_api_key: str | None = None,
+    ) -> None:
         self._db_path = db_path
+        # Embedding config — empty string disables hybrid (test-mode override).
+        self._embed_url: str = (
+            embed_url
+            if embed_url is not None
+            else os.environ.get("AI_KNOT_EMBED_URL", "http://localhost:11434")
+        )
+        self._embed_model: str = (
+            embed_model
+            if embed_model is not None
+            else os.environ.get("AI_KNOT_EMBED_MODEL", "nomic-embed-text")
+        )
+        self._embed_api_key: str | None = (
+            embed_api_key
+            if embed_api_key is not None
+            else (os.environ.get("AI_KNOT_EMBED_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+        )
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -125,7 +177,47 @@ class SQLiteStorage:
             from ai_knot.migrations.v2_query_planes import apply_v2_migration
 
             apply_v2_migration(conn)
+            # v3 embedding columns — idempotent
+            from ai_knot.migrations.v3_plane_embeddings import apply_v3_migration
+
+            apply_v3_migration(conn)
         self._migrate_db()
+
+    def _embed_texts_sync(self, texts: list[str]) -> list[list[float]]:
+        """Synchronous wrapper for async embed_texts.
+
+        Uses ThreadPoolExecutor when an event loop is already running.
+        Returns [] on any failure — callers fall back to BM25-only.
+        """
+        if not self._embed_url or not self._embed_model or not texts:
+            return []
+        try:
+            import asyncio
+            from concurrent.futures import ThreadPoolExecutor
+
+            from ai_knot.embedder import embed_texts as _embed_texts
+
+            async def _run() -> list[list[float]]:
+                return await _embed_texts(
+                    texts,
+                    base_url=self._embed_url,
+                    model=self._embed_model,
+                )
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None and loop.is_running():
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(asyncio.run, _run())
+                    return future.result(timeout=120)
+            else:
+                return asyncio.run(_run())
+        except Exception:
+            logger.debug("embed_texts failed; falling back to BM25-only", exc_info=True)
+            return []
 
     def _migrate_db(self) -> None:
         """Add new columns to existing databases (backward compat)."""
@@ -574,7 +666,7 @@ class SQLiteStorage:
     # ------------------------------------------------------------------ #
 
     def save_episodes(self, agent_id: str, episodes: list[Any]) -> None:
-        """Upsert raw episodes."""
+        """Upsert raw episodes — preserves embedding cache when raw_text is unchanged."""
         if not episodes:
             return
         rows = [
@@ -594,10 +686,21 @@ class SQLiteStorage:
         ]
         with self._conn() as conn:
             conn.executemany(
-                """INSERT OR REPLACE INTO raw_episodes
+                """INSERT INTO raw_episodes
                    (id, agent_id, session_id, turn_id, speaker, observed_at,
                     session_date, raw_text, source_meta, parent_episode_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(agent_id, id) DO UPDATE SET
+                       session_id=excluded.session_id,
+                       turn_id=excluded.turn_id,
+                       speaker=excluded.speaker,
+                       observed_at=excluded.observed_at,
+                       session_date=excluded.session_date,
+                       source_meta=excluded.source_meta,
+                       parent_episode_id=excluded.parent_episode_id,
+                       raw_text=excluded.raw_text,
+                       embedding=CASE WHEN excluded.raw_text=raw_text THEN embedding ELSE NULL END,
+                       embedding_model=CASE WHEN excluded.raw_text=raw_text THEN embedding_model ELSE NULL END""",
                 rows,
             )
 
@@ -631,23 +734,238 @@ class SQLiteStorage:
             ).fetchone()
         return _row_to_episode(row) if row else None
 
+    def search_episodes_by_entities(
+        self,
+        agent_id: str,
+        entities: tuple[str, ...] | list[str],
+        *,
+        query: str = "",
+        top_k: int = 5,
+    ) -> list[Any]:
+        """Entity-filtered raw-episode search with hybrid BM25+embedding RRF ranking.
+
+        Sub-step A: scores each candidate with max(bm25(center), bm25(window)).
+        Sub-step B: when embedding is configured, fuses BM25 and cosine via RRF.
+        """
+        if not entities:
+            return []
+        placeholders = " OR ".join(["raw_text LIKE ?"] * len(entities))
+        params: list[Any] = [agent_id] + [f"%{e}%" for e in entities]
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, agent_id, session_id, turn_id, speaker, observed_at, "
+                "session_date, raw_text, source_meta, parent_episode_id "
+                "FROM raw_episodes WHERE agent_id=? AND (" + placeholders + ")",
+                params,
+            ).fetchall()
+        episodes = [_row_to_episode(r) for r in rows]
+        if not episodes:
+            return []
+
+        # Build session order for 3-turn window
+        session_ids = {ep.session_id for ep in episodes}
+
+        def _turn_index(turn_id: str) -> int:
+            try:
+                return int(turn_id.rsplit("-", 1)[-1])
+            except (ValueError, IndexError):
+                return 0
+
+        session_ordered: dict[str, list[tuple[str, str]]] = {}
+        with self._conn() as conn:
+            for sid in session_ids:
+                sess_rows = conn.execute(
+                    "SELECT id, raw_text, observed_at, turn_id "
+                    "FROM raw_episodes WHERE agent_id=? AND session_id=?",
+                    (agent_id, sid),
+                ).fetchall()
+                sorted_rows = sorted(
+                    sess_rows,
+                    key=lambda r: (r[2], _turn_index(r[3])),
+                )
+                session_ordered[sid] = [(r[0], r[1]) for r in sorted_rows]
+
+        neighbours: dict[str, tuple[str | None, str | None]] = {}
+        for _sid, ordered in session_ordered.items():
+            last = len(ordered) - 1
+            for pos, (ep_id, _) in enumerate(ordered):
+                prev_id = ordered[pos - 1][0] if pos > 0 else None
+                next_id = ordered[pos + 1][0] if pos < last else None
+                neighbours[ep_id] = (prev_id, next_id)
+
+        def _window_text(ep: Any) -> str:
+            sid = ep.session_id
+            ordered = session_ordered.get(sid)
+            center = str(ep.raw_text)
+            if not ordered:
+                return center
+            pos_map = {eid: i for i, (eid, _) in enumerate(ordered)}
+            pos = pos_map.get(ep.id)
+            if pos is None:
+                return center
+            last = len(ordered) - 1
+            prev_text = str(ordered[pos - 1][1]) if pos > 0 else ""
+            next_text = str(ordered[pos + 1][1]) if pos < last else ""
+            return (center + " " + prev_text + " " + center + " " + next_text).strip()
+
+        def _recency(ep: Any) -> Any:
+            return ep.session_date or ep.observed_at
+
+        def _make_hit(ep: Any) -> EpisodeHit:
+            prev_id, next_id = neighbours.get(ep.id, (None, None))
+            return EpisodeHit(
+                id=ep.id,
+                raw_text=ep.raw_text,
+                prev_id=prev_id,
+                next_id=next_id,
+            )
+
+        if not query:
+            top = sorted(episodes, key=_recency, reverse=True)[:top_k]
+            return [_make_hit(ep) for ep in top]
+
+        from collections import Counter
+        from math import log
+
+        from ai_knot.tokenizer import tokenize
+
+        q_tokens = tokenize(query)
+        if not q_tokens:
+            top = sorted(episodes, key=_recency, reverse=True)[:top_k]
+            return [_make_hit(ep) for ep in top]
+
+        tokenized_windows = [tokenize(_window_text(ep)) for ep in episodes]
+        tokenized_centers = [tokenize(ep.raw_text) for ep in episodes]
+        n_docs = len(tokenized_windows)
+        avg_doc_len = sum(len(doc) for doc in tokenized_windows) / max(1, n_docs)
+
+        doc_freq: Counter[str] = Counter()
+        for doc in tokenized_windows:
+            for tok in set(doc):
+                doc_freq[tok] += 1
+
+        k1 = 1.5
+        b = 0.75
+
+        def _bm25_score(doc_tokens: list[str]) -> float:
+            if not doc_tokens:
+                return 0.0
+            tf: Counter[str] = Counter(doc_tokens)
+            doc_len = len(doc_tokens)
+            score = 0.0
+            for tok in q_tokens:
+                freq = tf.get(tok, 0)
+                if freq <= 0:
+                    continue
+                idf = log((n_docs - doc_freq[tok] + 0.5) / (doc_freq[tok] + 0.5) + 1.0)
+                norm = freq + k1 * (1.0 - b + b * (doc_len / max(1.0, avg_doc_len)))
+                score += idf * (freq * (k1 + 1.0)) / norm
+            return score
+
+        # Sub-step A: score = max(bm25(center), bm25(window))
+        ranked = sorted(
+            zip(episodes, tokenized_windows, tokenized_centers, strict=False),
+            key=lambda trip: (
+                max(_bm25_score(trip[1]), _bm25_score(trip[2])),
+                _recency(trip[0]),
+            ),
+            reverse=True,
+        )
+        bm25_ranked_ids = [ep.id for ep, _w, _c in ranked]
+
+        # Sub-step B: hybrid RRF — only when embed is configured.
+        embed_ranked_ids: list[str] = []
+        if self._embed_url and self._embed_model and query:
+            with self._conn() as conn:
+                ep_ids_sql = ",".join("?" * len(episodes))
+                cache_rows = conn.execute(
+                    f"SELECT id, embedding, embedding_model FROM raw_episodes "
+                    f"WHERE agent_id=? AND id IN ({ep_ids_sql})",
+                    [agent_id] + [ep.id for ep in episodes],
+                ).fetchall()
+            cached: dict[str, list[float]] = {
+                r[0]: _deserialize_vec(r[1])
+                for r in cache_rows
+                if r[1] is not None and r[2] == self._embed_model
+            }
+            missing = [ep for ep in episodes if ep.id not in cached]
+            texts_to_embed = [ep.raw_text for ep in missing] + [query]
+            vecs = self._embed_texts_sync(texts_to_embed)
+            if vecs and len(vecs) == len(texts_to_embed):
+                *miss_vecs, qvec = vecs
+                if miss_vecs:
+                    with self._conn() as conn:
+                        conn.executemany(
+                            "UPDATE raw_episodes SET embedding=?, embedding_model=? "
+                            "WHERE agent_id=? AND id=?",
+                            [
+                                (_serialize_vec(v), self._embed_model, agent_id, m.id)
+                                for m, v in zip(missing, miss_vecs, strict=True)
+                            ],
+                        )
+                    cached.update({m.id: v for m, v in zip(missing, miss_vecs, strict=True)})
+                from ai_knot.embedder import cosine as _cosine
+
+                scored_cos = [
+                    (ep.id, _cosine(cached[ep.id], qvec)) for ep in episodes if ep.id in cached
+                ]
+                scored_cos.sort(key=lambda t: t[1], reverse=True)
+                embed_ranked_ids = [eid for eid, _ in scored_cos]
+
+        if embed_ranked_ids:
+            from ai_knot._bm25 import _rrf_fuse
+
+            fused = _rrf_fuse([bm25_ranked_ids, embed_ranked_ids], weights=[2.0, 1.0])
+            eps_by_id = {ep.id: ep for ep in episodes}
+            top_ids = sorted(
+                (eid for eid in fused if eid in eps_by_id),
+                key=lambda i: (fused[i], _recency(eps_by_id[i])),
+                reverse=True,
+            )[:top_k]
+            return [_make_hit(eps_by_id[i]) for i in top_ids]
+
+        return [_make_hit(ep) for ep, _w, _c in ranked[:top_k]]
+
     # ------------------------------------------------------------------ #
     # ClaimStore (v2)
     # ------------------------------------------------------------------ #
 
     def save_claims(self, agent_id: str, claims: list[Any]) -> None:
-        """Upsert atomic claims."""
+        """Upsert atomic claims — preserves embedding cache when value_text is unchanged."""
         if not claims:
             return
         rows = [_claim_to_row(agent_id, c) for c in claims]
         with self._conn() as conn:
             conn.executemany(
-                """INSERT OR REPLACE INTO atomic_claims
+                """INSERT INTO atomic_claims
                    (id, agent_id, kind, subject, relation, value_text, value_tokens,
                     qualifiers, polarity, event_time, observed_at, valid_from, valid_until,
                     confidence, salience, source_episode_id, source_spans,
                     materialization_version, materialized_at, slot_key, version, origin_agent_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(agent_id, id) DO UPDATE SET
+                       kind=excluded.kind,
+                       subject=excluded.subject,
+                       relation=excluded.relation,
+                       value_tokens=excluded.value_tokens,
+                       qualifiers=excluded.qualifiers,
+                       polarity=excluded.polarity,
+                       event_time=excluded.event_time,
+                       observed_at=excluded.observed_at,
+                       valid_from=excluded.valid_from,
+                       valid_until=excluded.valid_until,
+                       confidence=excluded.confidence,
+                       salience=excluded.salience,
+                       source_episode_id=excluded.source_episode_id,
+                       source_spans=excluded.source_spans,
+                       materialization_version=excluded.materialization_version,
+                       materialized_at=excluded.materialized_at,
+                       slot_key=excluded.slot_key,
+                       version=excluded.version,
+                       origin_agent_id=excluded.origin_agent_id,
+                       value_text=excluded.value_text,
+                       embedding=CASE WHEN excluded.value_text=value_text THEN embedding ELSE NULL END,
+                       embedding_model=CASE WHEN excluded.value_text=value_text THEN embedding_model ELSE NULL END""",
                 rows,
             )
 
@@ -691,22 +1009,170 @@ class SQLiteStorage:
         return [_row_to_claim(r) for r in rows]
 
     def iter_value_text(self, agent_id: str) -> list[tuple[str, str]]:
-        """Return [(claim_id, value_text)] for BM25 retrieval."""
+        """Return [(claim_id, search_text)] for BM25 retrieval.
+
+        search_text = "{subject} {relation} {value_text}" for richer matching.
+        """
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT id, value_text FROM atomic_claims WHERE agent_id=? AND valid_until IS NULL",
+                "SELECT id, subject, relation, value_text FROM atomic_claims "
+                "WHERE agent_id=? AND valid_until IS NULL",
                 (agent_id,),
             ).fetchall()
-        return [(r[0], r[1]) for r in rows]
+        return [(r[0], f"{r[1] or ''} {r[2] or ''} {r[3]}".strip()) for r in rows]
+
+    def search_claims_semantic(
+        self,
+        agent_id: str,
+        question: str,
+        *,
+        top_k: int = 60,
+    ) -> list[Any]:
+        """Hybrid BM25(IDF)+cosine RRF search over atomic_claims.
+
+        Returns claims in scored order. Falls back to BM25-only when embedding
+        is unavailable or fails.
+        """
+        from collections import Counter
+        from math import log
+
+        from ai_knot.tokenizer import tokenize
+
+        _COLS = (
+            "id, agent_id, kind, subject, relation, value_text, value_tokens, "
+            "qualifiers, polarity, event_time, observed_at, valid_from, valid_until, "
+            "confidence, salience, source_episode_id, source_spans, "
+            "materialization_version, materialized_at, slot_key, version, origin_agent_id, "
+            "embedding, embedding_model"
+        )
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLS} FROM atomic_claims WHERE agent_id=? AND valid_until IS NULL",
+                (agent_id,),
+            ).fetchall()
+
+        if not rows:
+            return []
+
+        rows_by_id: dict[str, Any] = {}
+        search_texts: list[tuple[str, str]] = []
+        for r in rows:
+            cid = r[0]
+            subject = r[3] or ""
+            relation = r[4] or ""
+            value_text = r[5] or ""
+            rows_by_id[cid] = r
+            search_texts.append((cid, f"{subject} {relation} {value_text}".strip()))
+
+        q_tokens = tokenize(question)
+        if not q_tokens:
+            return [_row_to_claim(r[:22]) for r in rows[:top_k]]
+
+        tokenized_docs = [(cid, tokenize(text)) for cid, text in search_texts]
+        n_docs = len(tokenized_docs)
+        avg_doc_len = sum(len(toks) for _, toks in tokenized_docs) / max(1, n_docs)
+
+        doc_freq: Counter[str] = Counter()
+        for _, toks in tokenized_docs:
+            for tok in set(toks):
+                doc_freq[tok] += 1
+
+        k1 = 1.5
+        b = 0.75
+
+        def _bm25(doc_tokens: list[str]) -> float:
+            if not doc_tokens:
+                return 0.0
+            tf: Counter[str] = Counter(doc_tokens)
+            doc_len = len(doc_tokens)
+            score = 0.0
+            for tok in q_tokens:
+                freq = tf.get(tok, 0)
+                if freq <= 0:
+                    continue
+                idf = log((n_docs - doc_freq[tok] + 0.5) / (doc_freq[tok] + 0.5) + 1.0)
+                norm = freq + k1 * (1.0 - b + b * (doc_len / max(1.0, avg_doc_len)))
+                score += idf * (freq * (k1 + 1.0)) / norm
+            return score
+
+        bm25_scored = sorted(
+            ((cid, _bm25(toks)) for cid, toks in tokenized_docs),
+            key=lambda t: t[1],
+            reverse=True,
+        )
+        bm25_ranked_ids = [cid for cid, _ in bm25_scored]
+
+        embed_ranked_ids: list[str] = []
+        if self._embed_url and self._embed_model and question:
+            cached_vec: dict[str, list[float]] = {}
+            for r in rows:
+                cid = r[0]
+                blob = r[22]
+                model_tag = r[23]
+                if blob is not None and model_tag == self._embed_model:
+                    cached_vec[cid] = _deserialize_vec(blob)
+
+            missing_ids = [cid for cid in rows_by_id if cid not in cached_vec]
+            missing_texts = [
+                next(text for c, text in search_texts if c == cid) for cid in missing_ids
+            ]
+            texts_to_embed = missing_texts + [question]
+            vecs = self._embed_texts_sync(texts_to_embed)
+            if vecs and len(vecs) == len(texts_to_embed):
+                *miss_vecs, qvec = vecs
+                if miss_vecs:
+                    with self._conn() as conn:
+                        conn.executemany(
+                            "UPDATE atomic_claims SET embedding=?, embedding_model=? "
+                            "WHERE agent_id=? AND id=?",
+                            [
+                                (_serialize_vec(v), self._embed_model, agent_id, cid)
+                                for cid, v in zip(missing_ids, miss_vecs, strict=True)
+                            ],
+                        )
+                    cached_vec.update(
+                        {cid: v for cid, v in zip(missing_ids, miss_vecs, strict=True)}
+                    )
+                from ai_knot.embedder import cosine as _cosine
+
+                scored_cos = [
+                    (cid, _cosine(cached_vec[cid], qvec)) for cid in rows_by_id if cid in cached_vec
+                ]
+                scored_cos.sort(key=lambda t: t[1], reverse=True)
+                embed_ranked_ids = [cid for cid, _ in scored_cos]
+
+        if embed_ranked_ids:
+            from ai_knot._bm25 import _rrf_fuse
+
+            fused = _rrf_fuse([bm25_ranked_ids, embed_ranked_ids], weights=[2.0, 1.0])
+            top_ids = sorted(fused, key=lambda i: fused[i], reverse=True)[:top_k]
+        else:
+            top_ids = bm25_ranked_ids[:top_k]
+
+        return [_row_to_claim(rows_by_id[cid][:22]) for cid in top_ids if cid in rows_by_id]
 
     def replace_claims_for_episodes(
         self, agent_id: str, episode_ids: list[str], new_claims: list[Any]
     ) -> None:
-        """Delete claims from these episodes and insert new ones."""
+        """Delete claims from these episodes and insert new ones.
+
+        Preserves embedding cache for claims whose value_text is unchanged.
+        """
         if not episode_ids:
             return
         placeholders = ",".join("?" * len(episode_ids))
         with self._conn() as conn:
+            # Save existing embedding cache before delete.
+            saved: dict[str, tuple[str, bytes, str]] = {}
+            cache_rows = conn.execute(
+                f"SELECT id, value_text, embedding, embedding_model "
+                f"FROM atomic_claims WHERE agent_id=? AND source_episode_id IN ({placeholders})",
+                [agent_id, *episode_ids],
+            ).fetchall()
+            for r in cache_rows:
+                if r[2] is not None and r[3] is not None:
+                    saved[r[0]] = (r[1], r[2], r[3])
+
             conn.execute(
                 f"DELETE FROM atomic_claims WHERE agent_id=? AND source_episode_id IN ({placeholders})",
                 [agent_id, *episode_ids],
@@ -714,7 +1180,7 @@ class SQLiteStorage:
             if new_claims:
                 rows = [_claim_to_row(agent_id, c) for c in new_claims]
                 conn.executemany(
-                    """INSERT OR REPLACE INTO atomic_claims
+                    """INSERT INTO atomic_claims
                        (id, agent_id, kind, subject, relation, value_text, value_tokens,
                         qualifiers, polarity, event_time, observed_at, valid_from, valid_until,
                         confidence, salience, source_episode_id, source_spans,
@@ -722,6 +1188,18 @@ class SQLiteStorage:
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     rows,
                 )
+                # Restore embeddings for claims whose value_text did not change.
+                restore_params = [
+                    (saved[c.id][1], saved[c.id][2], agent_id, c.id)
+                    for c in new_claims
+                    if c.id in saved and c.value_text == saved[c.id][0]
+                ]
+                if restore_params:
+                    conn.executemany(
+                        "UPDATE atomic_claims SET embedding=?, embedding_model=? "
+                        "WHERE agent_id=? AND id=?",
+                        restore_params,
+                    )
 
     def delete_all_claims(self, agent_id: str) -> None:
         """Remove all claims for an agent."""
@@ -732,7 +1210,9 @@ class SQLiteStorage:
     # BundleStore (v2)
     # ------------------------------------------------------------------ #
 
-    def save_bundles(self, agent_id: str, bundles: list[Any], memberships: dict[str, list[str]]) -> None:
+    def save_bundles(
+        self, agent_id: str, bundles: list[Any], memberships: dict[str, list[str]]
+    ) -> None:
         """Persist bundles and their member claim lists."""
         if not bundles:
             return
@@ -754,7 +1234,9 @@ class SQLiteStorage:
             for bundle_id, claim_ids in memberships.items()
             for rank, claim_id in enumerate(claim_ids)
         ]
+        bundle_ids = [b.id for b in bundles]
         with self._conn() as conn:
+            # Upsert bundle rows (stable IDs make this idempotent).
             conn.executemany(
                 """INSERT OR REPLACE INTO support_bundles
                    (id, agent_id, kind, topic, bundle_score, score_formula,
@@ -762,9 +1244,16 @@ class SQLiteStorage:
                    VALUES (?,?,?,?,?,?,?,?)""",
                 bundle_rows,
             )
+            # Delete then re-insert memberships to avoid stale member rows.
+            if bundle_ids:
+                bp = ",".join("?" * len(bundle_ids))
+                conn.execute(
+                    f"DELETE FROM bundle_members WHERE agent_id=? AND bundle_id IN ({bp})",
+                    [agent_id, *bundle_ids],
+                )
             if member_rows:
                 conn.executemany(
-                    """INSERT OR REPLACE INTO bundle_members
+                    """INSERT INTO bundle_members
                        (agent_id, bundle_id, claim_id, member_rank)
                        VALUES (?,?,?,?)""",
                     member_rows,
