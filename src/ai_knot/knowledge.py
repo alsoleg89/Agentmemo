@@ -467,7 +467,6 @@ class KnowledgeBase(_LearningMixin):
                                 batch,
                                 base_url=self._embed_url,
                                 model=self._embed_model,
-                                api_key=self._embed_api_key,
                             ),
                         ).result(timeout=120)
                         if not vecs:
@@ -484,7 +483,6 @@ class KnowledgeBase(_LearningMixin):
                             batch,
                             base_url=self._embed_url,
                             model=self._embed_model,
-                            api_key=self._embed_api_key,
                         )
                     )
                     if not vecs:
@@ -1544,24 +1542,35 @@ class KnowledgeBase(_LearningMixin):
 
         t0 = _time.monotonic()
 
-        # Mark in-progress.
+        # Preserve dirty_keys so they aren't lost if rebuild fails.
+        preserved_dirty_keys = str(meta.get("dirty_keys_json", "[]") or "[]")
+
+        # Mark in-progress — keep dirty_keys intact until rebuild succeeds.
         if hasattr(self._storage, "save_materialization_meta"):
             self._storage.save_materialization_meta(
                 self._agent_id,
                 schema_version=2,
                 materialization_version=current_ver,
-                dirty_keys_json="[]",
+                dirty_keys_json=preserved_dirty_keys,
                 rebuild_status="in_progress",
             )
 
         try:
             episodes = self._storage.load_episodes(self._agent_id)
-            claims = rebuild_claims_from_raw(episodes, version=MATERIALIZATION_VERSION)
+            ep_ids = [ep.id for ep in episodes]
 
-            if hasattr(self._storage, "delete_all_claims"):
-                self._storage.delete_all_claims(self._agent_id)
-            if hasattr(self._storage, "save_claims") and claims:
-                self._storage.save_claims(self._agent_id, claims)
+            # Purge stale claims for all episodes before rebuilding.
+            # This ensures no orphaned claims survive across rebuilds.
+            if ep_ids and hasattr(self._storage, "replace_claims_for_episodes"):
+                new_claims = rebuild_claims_from_raw(episodes, version=MATERIALIZATION_VERSION)
+                self._storage.replace_claims_for_episodes(self._agent_id, ep_ids, new_claims)
+                claims = new_claims
+            else:
+                claims = rebuild_claims_from_raw(episodes, version=MATERIALIZATION_VERSION)
+                if hasattr(self._storage, "delete_all_claims"):
+                    self._storage.delete_all_claims(self._agent_id)
+                if hasattr(self._storage, "save_claims") and claims:
+                    self._storage.save_claims(self._agent_id, claims)
 
             n_bundles = 0
             if hasattr(self._storage, "clear_all_bundles"):
@@ -1569,6 +1578,7 @@ class KnowledgeBase(_LearningMixin):
                 # Bundles rebuilt lazily on first query — only count cleared.
                 n_bundles = 0
 
+            # Clear dirty_keys only after successful rebuild.
             if hasattr(self._storage, "save_materialization_meta"):
                 self._storage.save_materialization_meta(
                     self._agent_id,
@@ -1594,7 +1604,7 @@ class KnowledgeBase(_LearningMixin):
                     self._agent_id,
                     schema_version=2,
                     materialization_version=current_ver,
-                    dirty_keys_json="[]",
+                    dirty_keys_json=preserved_dirty_keys,
                     rebuild_status="error",
                 )
             raise

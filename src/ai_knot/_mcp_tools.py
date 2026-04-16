@@ -324,7 +324,17 @@ def tool_ingest_episode(
     from datetime import UTC, datetime
 
     obs = datetime.fromisoformat(observed_at) if observed_at else datetime.now(UTC)
-    sdate = datetime.fromisoformat(session_date) if session_date else None
+    sdate: datetime | None = None
+    if session_date:
+        try:
+            sdate = datetime.fromisoformat(session_date)
+        except ValueError:
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "tool_ingest_episode: could not parse session_date %r as ISO format; ignoring",
+                session_date,
+            )
 
     try:
         episode = kb.ingest_episode(
