@@ -150,22 +150,36 @@ def fallback_claim_search(
     *,
     top_k: int = 60,
 ) -> list[AtomicClaim]:
-    """BM25 search over atomic_claims.value_text when bundle plane is empty.
+    """Hybrid BM25+embedding search over atomic_claims when bundle plane is empty.
 
-    Uses the lightweight built-in BM25 kernel.
+    Delegates to storage.search_claims_semantic when available (SQLiteStorage),
+    which returns claims in scored order and supports hybrid BM25+cosine RRF.
+
+    Falls back to the legacy overlap-TF path for non-SQLite backends that lack
+    search_claims_semantic (YAML storage, etc.).
     """
     cs = _get_claim_store(storage)
+
+    # Prefer search_claims_semantic: returns scored order, uses proper IDF BM25
+    # + optional cosine RRF, does NOT route through load_claims(ids=...) which
+    # would destroy the ranked order by resorting to observed_at.
+    if hasattr(cs, "search_claims_semantic"):
+        return cast(
+            list[AtomicClaim],
+            cs.search_claims_semantic(agent_id, question, top_k=top_k),
+        )
+
+    # Legacy overlap-TF path — preserved for non-SQLite backends.
+    # NOTE: load_claims reshuffles by observed_at, so this path loses ranking.
+    # Acceptable for YAML backends where this was already pre-existing behaviour.
     if not hasattr(cs, "iter_value_text") or not hasattr(cs, "load_claims"):
         return []
-
     pairs: list[tuple[str, str]] = list(cs.iter_value_text(agent_id))
     if not pairs:
         return []
-
     scored = _bm25_score_pairs(question, pairs, top_k=top_k)
     if not scored:
         return []
-
     ids = [cid for cid, _ in scored]
     return cast(list[AtomicClaim], cs.load_claims(agent_id, ids=ids, active_only=True))
 

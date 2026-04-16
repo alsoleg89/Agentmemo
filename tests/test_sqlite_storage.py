@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+from datetime import UTC
 
 import pytest
 
@@ -216,7 +217,7 @@ def test_search_episodes_window_ranks_cross_turn_match(tmp_path: object) -> None
 
     from ai_knot.storage.sqlite_storage import EpisodeHit, SQLiteStorage
 
-    storage = SQLiteStorage(db_path=str(tmp_path / "t.db"))  # type: ignore[operator]
+    storage = SQLiteStorage(db_path=str(tmp_path / "t.db"), embed_url="")  # type: ignore[operator]
     t0 = datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC)
     t1 = datetime(2024, 1, 1, 10, 1, 0, tzinfo=UTC)
     t2 = datetime(2024, 1, 1, 10, 2, 0, tzinfo=UTC)
@@ -258,3 +259,120 @@ def test_search_episodes_window_ranks_cross_turn_match(tmp_path: object) -> None
     # Neighbours must be populated (session has 3 episodes)
     assert top.prev_id is not None, "prev_id must be set for a middle episode"
     assert top.next_id is not None, "next_id must be set for a middle episode"
+
+
+def test_search_episodes_centre_beats_window(tmp_path: object) -> None:
+    """Sub-step A: exact-match on centre text must outscore a neighbour-diluted candidate."""
+    from datetime import datetime
+
+    from ai_knot.query_types import RawEpisode
+    from ai_knot.storage.sqlite_storage import SQLiteStorage
+
+    storage = SQLiteStorage(str(tmp_path / "test.db"), embed_url="")  # type: ignore[operator]
+
+    def ep(id_: str, session: str, turn: int, text: str) -> RawEpisode:
+        return RawEpisode(
+            id=id_,
+            agent_id="agent1",
+            session_id=session,
+            turn_id=f"{session}-{turn}",
+            speaker="user",
+            observed_at=datetime(2024, 1, turn, tzinfo=UTC),
+            session_date=None,
+            raw_text=text,
+            source_meta={},
+            parent_episode_id=None,
+        )
+
+    storage.save_episodes(
+        "agent1",
+        [
+            ep("s1_prev", "sess1", 1, "Alice went to Paris for vacation last month."),
+            ep("s1_center", "sess1", 2, "Alice lives in Paris now."),  # exact answer
+            ep("s1_next", "sess1", 3, "She loves the Eiffel Tower."),
+            # sess2: Alice is mentioned in centre but answer is only in neighbour
+            ep(
+                "s2_prev", "sess2", 1, "Alice mentioned she had been to Paris."
+            ),  # neighbour has answer tokens
+            ep(
+                "s2_center", "sess2", 2, "Alice went to the grocery store."
+            ),  # noisy centre, no answer tokens
+            ep("s2_next", "sess2", 3, "Alice bought croissants there."),
+        ],
+    )
+
+    hits = storage.search_episodes_by_entities(
+        "agent1", ["Alice"], query="Where does Alice live?", top_k=5
+    )
+    ids = [h.id for h in hits]
+    # Both s1_center and s2_center must appear (both mention Alice).
+    assert "s1_center" in ids, f"s1_center missing from results: {ids}"
+    assert "s2_center" in ids, f"s2_center missing from results: {ids}"
+    assert ids.index("s1_center") < ids.index("s2_center"), (
+        "Centre-strong match 's1_center' must rank above neighbour-diluted 's2_center'"
+    )
+
+
+def test_search_episodes_hybrid_semantic_gap(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sub-step B: stub embedder makes semantic match win when BM25 cannot."""
+
+    from datetime import datetime
+
+    import ai_knot.embedder as _embedder_mod
+    from ai_knot.query_types import RawEpisode
+    from ai_knot.storage.sqlite_storage import SQLiteStorage
+
+    storage = SQLiteStorage(
+        str(tmp_path / "test.db"),  # type: ignore[operator]
+        embed_url="http://fake-embed",
+        embed_model="test-model",
+    )
+
+    def ep(id_: str, text: str) -> RawEpisode:
+        return RawEpisode(
+            id=id_,
+            agent_id="agent1",
+            session_id="sess1",
+            turn_id=f"sess1-{id_}",
+            speaker="user",
+            observed_at=datetime(2024, 1, 1, tzinfo=UTC),
+            session_date=None,
+            raw_text=text,
+            source_meta={},
+            parent_episode_id=None,
+        )
+
+    storage.save_episodes(
+        "agent1",
+        [
+            ep("ep_bm25", "Alice works at Google."),  # BM25 match on "works"
+            ep("ep_semantic", "Alice is employed by Google."),  # semantic match, no BM25 on "job"
+        ],
+    )
+
+    # Stub embedder: ep_semantic is closer to the query vector than ep_bm25.
+    # query=[1,0], ep_semantic=[0.9,0.1], ep_bm25=[0.1,0.9]
+    async def fake_embed(
+        texts: list[str],
+        *,
+        base_url: str,
+        model: str,
+        api_key: str | None = None,
+        timeout: float = 30.0,
+    ) -> list[list[float]]:
+        vectors = {
+            "Alice works at Google.": [0.1, 0.9],
+            "Alice is employed by Google.": [0.9, 0.1],
+        }
+        return [vectors.get(t, [0.5, 0.5]) for t in texts]
+
+    monkeypatch.setattr(_embedder_mod, "embed_texts", fake_embed)
+
+    hits = storage.search_episodes_by_entities(
+        "agent1", ["Alice"], query="What is Alice's job?", top_k=2
+    )
+    ids = [h.id for h in hits]
+    # ep_semantic should appear in results because of hybrid fusion
+    assert "ep_semantic" in ids, f"Semantic match missing from hybrid results: {ids}"

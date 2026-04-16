@@ -88,7 +88,7 @@ def yaml_storage(tmp_dir: pathlib.Path) -> YAMLStorage:
 @pytest.fixture
 def sqlite_storage(tmp_dir: pathlib.Path) -> SQLiteStorage:
     """SQLite storage backed by a temporary database file."""
-    return SQLiteStorage(db_path=str(tmp_dir / "test.db"))
+    return SQLiteStorage(db_path=str(tmp_dir / "test.db"), embed_url="")
 
 
 @pytest.fixture
