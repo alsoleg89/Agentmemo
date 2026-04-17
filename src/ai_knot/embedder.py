@@ -37,9 +37,10 @@ async def embed_texts(
     *,
     base_url: str = _DEFAULT_BASE_URL,
     model: str = _DEFAULT_MODEL,
+    api_key: str | None = None,
     timeout: float = _DEFAULT_TIMEOUT,
 ) -> list[list[float]]:
-    """Embed *texts* via Ollama's /v1/embeddings endpoint.
+    """Embed *texts* via an OpenAI-compatible /v1/embeddings endpoint.
 
     Returns a list of float vectors, one per input text.
     Returns an empty list (not raises) on any connection or HTTP error so
@@ -47,19 +48,21 @@ async def embed_texts(
 
     Args:
         texts: Strings to embed.  Empty input returns [] immediately.
-        base_url: Base URL of the Ollama server (default: localhost:11434).
+        base_url: Base URL of the embedding server (default: localhost:11434).
         model: Embedding model name (default: nomic-embed-text).
+        api_key: API key for authorization.  Defaults to "ollama" for local servers.
         timeout: Per-request timeout in seconds.
     """
     if not texts:
         return []
     url = f"{base_url.rstrip('/')}/v1/embeddings"
+    auth = f"Bearer {api_key}" if api_key else "Bearer ollama"
     client = _get_client()
     try:
         async with _SEM:
             resp = await client.post(
                 url,
-                headers={"Authorization": "Bearer ollama", "Content-Type": "application/json"},
+                headers={"Authorization": auth, "Content-Type": "application/json"},
                 json={"model": model, "input": texts},
                 timeout=timeout,
             )

@@ -202,6 +202,7 @@ class SQLiteStorage:
                     texts,
                     base_url=self._embed_url,
                     model=self._embed_model,
+                    api_key=self._embed_api_key or None,
                 )
 
             try:
