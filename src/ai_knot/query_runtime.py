@@ -96,6 +96,14 @@ def execute_query(
             eps = search_fn(
                 agent_id, frame.focus_entities, query=question, top_k=60, diversity=diversity
             )
+            # For SET queries: add entity-coverage channel (recency-sorted, no BM25)
+            # to catch facts mentioned without question-matching vocabulary.
+            if diversity:
+                cov_eps = search_fn(
+                    agent_id, frame.focus_entities, query="", top_k=40, diversity=False
+                )
+                seen_ep_ids = {e.id for e in eps}
+                eps = eps + [e for e in cov_eps if e.id not in seen_ep_ids]
             # Contract-driven window:
             #   EVENT/INTERVAL → 5-turn (±2) + optional date-proximity sort
             #   SET → 5-turn (±2) for wider recall across multi-fact sessions
