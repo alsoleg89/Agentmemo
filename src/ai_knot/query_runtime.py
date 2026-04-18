@@ -282,13 +282,7 @@ def _render_evidence_context(
         prefix = f"[{sd.date().isoformat()}] " if sd is not None else ""
         lines.append(f"{prefix}{' / '.join(window_parts)}")
 
-    result = "\n".join(lines)
-    # Cap evidence context to ~8K tokens (~32K chars) to test memory
-    # quality rather than raw-context recall.
-    max_chars = 32_000
-    if len(result) > max_chars:
-        result = result[:max_chars]
-    return result
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
