@@ -347,6 +347,7 @@ class AnswerTrace:
     strategy: str  # operator name chosen
     decision_notes: tuple[str, ...]
     latency_ms: float
+    distinct_session_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {

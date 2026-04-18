@@ -20,6 +20,7 @@ from ai_knot.query_operators import OPERATORS, choose_strategy
 from ai_knot.query_types import (
     AnswerContract,
     AnswerItem,
+    AnswerSpace,
     AnswerTrace,
     AtomicClaim,
     EvidenceProfile,
@@ -90,7 +91,10 @@ def execute_query(
     if frame.focus_entities:
         search_fn = getattr(storage, "search_episodes_by_entities", None)
         if search_fn is not None:
-            eps = search_fn(agent_id, frame.focus_entities, query=question, top_k=60)
+            diversity = contract.answer_space is AnswerSpace.SET
+            eps = search_fn(
+                agent_id, frame.focus_entities, query=question, top_k=60, diversity=diversity
+            )
             seen: set[str] = set()
             window_ids: list[str] = []
             for hit in eps:
