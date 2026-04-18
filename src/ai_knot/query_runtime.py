@@ -132,7 +132,6 @@ def execute_query(
 
     # 10. Build evidence_text: preference block first, then session-grouped main.
     ep_ids = _collect_evidence_episode_ids(answer_items, claims, episode_search_ids)
-    ep_ids = _sort_episode_ids_by_date(storage, agent_id, ep_ids)
 
     # Preference block (cat3 speculation support) — separate retrieval.
     from ai_knot.preference_retrieval import retrieve_preference_episodes
@@ -417,8 +416,16 @@ def _render_evidence_context(
             session_first_date[sid] = getattr(ep, "session_date", None)
         sessions[sid].append((eid, ep))
 
-    # Keep retrieval relevance order (first-appearance = highest ranked)
+    # Sessions in retrieval relevance order (first-appearance = highest ranked session first).
+    # Within each session, sort episodes chronologically so the reader sees turns in order.
     sorted_sids = list(sessions.keys())
+    for sid in sorted_sids:
+        sessions[sid].sort(
+            key=lambda pair: (
+                getattr(pair[1], "session_date", None) or datetime.min,
+                getattr(pair[1], "turn_id", ""),
+            )
+        )
 
     rendered_eps: set[str] = set()
     lines: list[str] = []
