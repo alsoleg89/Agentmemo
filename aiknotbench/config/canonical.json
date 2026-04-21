@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "models": {
+    "answer": "gpt-4o-mini",
+    "answer_max_tokens": 256,
+    "answer_temperature": 0.0,
+    "embed_model": "text-embedding-3-small",
+    "embed_url": "https://api.openai.com",
+    "judge": "gpt-4o-mini",
+    "judge_max_tokens": 32,
+    "judge_temperature": 0.0
+  },
+  "retrieval": {
+    "ddsa_enabled": false,
+    "ingest_mode": "dated",
+    "llm_recall": false,
+    "profile": "balanced",
+    "rrf_weights": [1.0, 1.0],
+    "top_k": 60
+  },
+  "dataset": {
+    "convs_default": [0, 1],
+    "path": "data/locomo10.json",
+    "sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"
+  },
+  "prompts": {
+    "answer_system_sha256": "54102d3fcf457ff97bf30e6b1e074b1bb8689c48881fcf1ccc761f46a2660f95",
+    "answer_user_template_sha256": "1a0a06b59505870c0b10309bc56d361c4aaec03651fcdaba812b8a919cbb04ee",
+    "judge_system_sha256": "2e225095dea82d2e2aea37ee75420ac6cb4fef9729e31ef8ecb6bff5406d8ae9"
+  },
+  "env_allowlist": [
+    "AI_KNOT_COMMAND",
+    "AI_KNOT_DB_PATH",
+    "AI_KNOT_EMBED_MODEL",
+    "AI_KNOT_EMBED_URL",
+    "AI_KNOT_PROVIDER",
+    "AIKNOT_DEBUG_TRACE",
+    "AIKNOT_QUERY_PROFILE",
+    "ANTHROPIC_API_KEY",
+    "OLLAMA_BASE_URL",
+    "OPENAI_API_KEY"
+  ]
+}
