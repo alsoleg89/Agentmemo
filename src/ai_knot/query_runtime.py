@@ -17,7 +17,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 import ai_knot.support_retrieval as _sr
-from ai_knot._bm25 import _rrf_fuse
 from ai_knot.query_contract import analyze_query, derive_answer_contract
 from ai_knot.query_operators import OPERATORS, choose_strategy
 from ai_knot.query_types import (
@@ -221,18 +220,13 @@ def execute_query(
     # 8. Render text.
     text = _render_text(answer_items, contract)
 
-    # 8b. Collect evidence episode IDs.
-    # When raw-search is sparse (<5 hits), joint RRF fuses claim+item signals to
-    # fill the gap. When rich, priority order (raw → items → claims) is better
-    # to avoid diluting a strong topical signal with weak claim-source noise.
-    if len(episode_search_ids) < 5:
-        ep_ids = _joint_rerank_episodes(
-            answer_items, claims, episode_search_ids, cap=caps.collect_cap
-        )
-    else:
-        ep_ids = _collect_evidence_episode_ids(
-            answer_items, claims, episode_search_ids=episode_search_ids, cap=caps.collect_cap
-        )
+    # 8b. Collect evidence episode IDs: raw-search → operator items → claims.
+    # Priority order preserves topical relevance; joint RRF across
+    # claim-source episodes was tried three times on this branch and each time
+    # regressed cat1 single-hop precision by 5+ percentage points.
+    ep_ids = _collect_evidence_episode_ids(
+        answer_items, claims, episode_search_ids=episode_search_ids, cap=caps.collect_cap
+    )
     evidence_text = _render_evidence_context(
         storage,
         agent_id,
@@ -406,55 +400,6 @@ def _collect_evidence_episode_ids(
         if _add(c.source_episode_id):
             return out
     return out
-
-
-def _joint_rerank_episodes(
-    items: list[AnswerItem],
-    claims: list[AtomicClaim],
-    episode_search_ids: list[str] | None,
-    cap: int = 15,
-    operator_head: str | None = None,
-) -> list[str]:
-    """Joint RRF fusion of episode-search and claim-source signals.
-
-    Three ranked lists fused via RRF (Cormack 2009):
-      1. Raw-episode search (entity+query BM25 — strongest topical signal, weight 2.0)
-      2. Episodes from operator-selected answer items (weight 1.5)
-      3. Episodes from all retrieved claims, ordered by claim sequence (weight 1.0)
-
-    If operator_head is set (for exact_state/time_resolve single-answer operators),
-    it is prepended unconditionally so the answer-model sees the strongest evidence
-    first regardless of RRF rank.
-    """
-    raw_list = episode_search_ids or []
-
-    item_list: list[str] = []
-    seen_item: set[str] = set()
-    for it in items:
-        for eid in it.source_episode_ids:
-            if eid and eid not in seen_item:
-                seen_item.add(eid)
-                item_list.append(eid)
-
-    claim_list: list[str] = []
-    seen_claim: set[str] = set()
-    for c in claims:
-        eid = c.source_episode_id
-        if eid and eid not in seen_claim:
-            seen_claim.add(eid)
-            claim_list.append(eid)
-
-    fused = _rrf_fuse([raw_list, item_list, claim_list], weights=[2.0, 1.5, 1.0])
-    ranked = sorted(fused, key=lambda x: fused[x], reverse=True)[:cap]
-
-    if operator_head:
-        if operator_head in ranked:
-            ranked.remove(operator_head)
-        ranked.insert(0, operator_head)
-        if len(ranked) > cap:
-            ranked = ranked[:cap]
-
-    return ranked
 
 
 def _render_evidence_context(
