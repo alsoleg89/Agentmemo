@@ -194,21 +194,9 @@ def execute_query(
     # 8. Render text.
     text = _render_text(answer_items, contract)
 
-    # 8b. Build evidence_text — joint RRF fusion of episode and claim signals.
-    ep_ids = _joint_rerank_episodes(
-        answer_items,
-        claims,
-        episode_search_ids,
-        cap=caps.collect_cap,
-        operator_head=(
-            # For deterministic single-value operators, surface the best-matching
-            # episode first so the answer-model sees the strongest evidence up top.
-            answer_items[0].source_episode_ids[0]
-            if strategy in ("exact_state", "time_resolve")
-            and len(answer_items) == 1
-            and answer_items[0].source_episode_ids
-            else None
-        ),
+    # 8b. Collect evidence episode IDs: raw-search → operator items → claims.
+    ep_ids = _collect_evidence_episode_ids(
+        answer_items, claims, episode_search_ids=episode_search_ids, cap=caps.collect_cap
     )
     evidence_text = _render_evidence_context(
         storage,
@@ -347,6 +335,42 @@ def _render_text(items: list[AnswerItem], contract: AnswerContract) -> str:
 # ---------------------------------------------------------------------------
 # Evidence context helpers
 # ---------------------------------------------------------------------------
+
+
+def _collect_evidence_episode_ids(
+    items: list[AnswerItem],
+    claims: list[AtomicClaim],
+    episode_search_ids: list[str] | None = None,
+    cap: int = 5,
+) -> list[str]:
+    """Unique episode ids in retrieval order: raw-search → items → claims.
+
+    Raw-search runs on entity + query text so it finds the most topically
+    relevant episodes.  Operator items and claim sources are appended as
+    secondary and tertiary sources to fill up to cap.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _add(eid: str | None) -> bool:
+        if eid and eid not in seen:
+            seen.add(eid)
+            out.append(eid)
+            return len(out) >= cap
+        return False
+
+    if episode_search_ids:
+        for eid in episode_search_ids:
+            if _add(eid):
+                return out
+    for it in items:
+        for eid in it.source_episode_ids:
+            if _add(eid):
+                return out
+    for c in claims:
+        if _add(c.source_episode_id):
+            return out
+    return out
 
 
 def _joint_rerank_episodes(

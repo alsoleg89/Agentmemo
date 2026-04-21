@@ -353,10 +353,10 @@ def test_evidence_profile_has_temporal_anchor():
 
 
 def test_evidence_ids_raw_search_first():
-    """_joint_rerank_episodes gives raw-search episodes higher rank than claim-only ones."""
+    """_collect_evidence_episode_ids puts raw-search episodes first for topical relevance."""
     from datetime import UTC, datetime
 
-    from ai_knot.query_runtime import _joint_rerank_episodes
+    from ai_knot.query_runtime import _collect_evidence_episode_ids
     from ai_knot.query_types import AnswerItem, ClaimKind
 
     now = datetime(2026, 4, 15, tzinfo=UTC)
@@ -383,15 +383,13 @@ def test_evidence_ids_raw_search_first():
     ]
     raw_search_ids = ["ep_raw_1", "ep_raw_2"]
 
-    result = _joint_rerank_episodes(
+    result = _collect_evidence_episode_ids(
         items,  # type: ignore[arg-type]
         claims,  # type: ignore[arg-type]
         episode_search_ids=raw_search_ids,
         cap=5,
     )
-    # Raw-search episodes score higher (weight 2.0) than claim-only episodes (weight 1.0).
-    assert "ep_raw_1" in result
+    # Raw-search episodes come first (topically relevant via entity+query text).
+    assert result[0] == "ep_raw_1", f"Raw-search episode should be first, got {result}"
     assert "ep_claim_only" in result
-    assert result.index("ep_raw_1") < result.index("ep_claim_only"), (
-        f"raw ep_raw_1 should rank above claim-only ep_claim_only; got {result}"
-    )
+    assert result.index("ep_raw_1") < result.index("ep_claim_only")
