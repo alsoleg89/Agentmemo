@@ -174,6 +174,25 @@ bench settings must have a paired entry here before it lands on the branch.
 
 ---
 
+## 2026-04-21 — Move 1C-plays FP `plays` pattern (REVERTED)
+
+**Commit:** not committed — reverted before merge on `feature/configurable-mcp-env-v0.9.4`
+**Baseline:** `p1-1b-2conv` — canonical (gpt-4o-mini × gpt-4o-mini), cat1 30.2 %, cat1-4 62.7 %
+**Run:** `data/runs/p1-1c-plays-2conv/report.json` — canonical (deviations=[]), same models
+**Config deviations:** none
+**Decision:** REVERT — aggregate regression exceeds stop-rule; target category erased
+**Reason:** Added `_FP_PLAYS_RE` as narrow STATE pattern for "I play/played/practice/practiced (the)? <single-token>" with negative-lookahead blacklist (with/around/here/to/…) between `_FP_ACTIVITY_RE` and `_FP_EVENT_PATTERNS` loop. Aim: cat1 Q 0:60-style instrument recall (e.g. "What instrument does Melanie play?"). In 2-conv canonical the pattern generated noise claims: cat1-4 aggregate dropped -2.1 pp (60.5 % vs 62.7 %), triggering `feedback_regression_stop_rule`. cat1 collapsed back to 25.6 % (-4.7 pp, erasing entire 1B gain) and cat2 dropped -3.2 pp. Likely failure mode: "practice" and uninflected "play" match non-instrument contexts ("I play my piece", "I practice routinely"-style with blacklist escapes), and emitted STATE `plays::<word>` crowds out the legitimate evidence chunks in render_top_k.
+**1C-plays numbers (canonical gpt-4o-mini × gpt-4o-mini):**
+  - cat1: 25.6 % (−4.7 pp ⚠ target erased to pre-1B baseline)
+  - cat2: 47.6 % (−3.2 pp ⚠ regressed)
+  - cat3: 69.2 % (±0)
+  - cat4: 79.8 % (−0.9 pp, within floor 72.5 % / abs 68.1 %)
+  - cat5: 23.9 % (−2.8 pp, within floor 20 %)
+  - cat1-4 aggregate: 60.5 % (−2.1 pp ⚠ exceeds 2 pp regression stop threshold)
+**Next baseline update:** no — `p1-1b-2conv` remains baseline for 1C-painted / 1C-read / 1D attempts
+
+---
+
 ## Known bad artifacts
 
 ### `data/runs/ddsa-off/`
