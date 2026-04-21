@@ -3,7 +3,11 @@
 #
 # Usage:
 #   cd aiknotbench
-#   ./scripts/bench_gate.sh [--convs 0,1] [--top-k 60]
+#   ./scripts/bench_gate.sh [--convs 0,1] [--top-k 60] [--allow-drift]
+#
+# --allow-drift: skip canonical-settings check (for local ollama runs).
+#                Results are tagged as drift-run and NOT comparable to
+#                canonical (gpt-4o-mini) baseline numbers.
 #
 # Exits 0 (PASS) or 1 (FAIL / regression detected).
 # Uses noise-floor from data/baselines/noise_floor_2conv.json if present,
@@ -16,21 +20,40 @@ cd "$BENCH_ROOT"
 
 export AIKNOT_DEBUG_TRACE=1
 
-CONVS="${1:-0,1}"
-TOP_K="${2:-60}"
+CONVS="0,1"
+TOP_K="60"
+ALLOW_DRIFT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --convs)   CONVS="$2";  shift 2 ;;
+    --top-k)   TOP_K="$2";  shift 2 ;;
+    --allow-drift) ALLOW_DRIFT="--allow-drift"; shift ;;
+    *) shift ;;
+  esac
+done
+
 SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")"
 RUN_ID="gate-${SHA}-2conv"
+if [[ -n "$ALLOW_DRIFT" ]]; then
+  RUN_ID="gate-${SHA}-2conv-drift"
+fi
 
 echo ""
 echo "================================================================="
-echo "  bench_gate.sh  run=${RUN_ID}  convs=${CONVS}  top_k=${TOP_K}"
+echo "  bench_gate.sh  run=${RUN_ID}  convs=${CONVS}  top_k=${TOP_K}${ALLOW_DRIFT:+  drift=yes}"
 echo "================================================================="
 echo ""
+
+if [[ -n "$ALLOW_DRIFT" ]]; then
+  echo "  NOTE: --allow-drift active — model deviations from canonical are allowed."
+  echo "        Results are NOT comparable to gpt-4o-mini baseline numbers."
+  echo ""
+fi
 
 # ---------------------------------------------------------------------------
 # Run the bench
 # ---------------------------------------------------------------------------
-npx tsx src/index.ts run -r "$RUN_ID" --convs "$CONVS" --top-k "$TOP_K" --force
+npx tsx src/index.ts run -r "$RUN_ID" --convs "$CONVS" --top-k "$TOP_K" --force ${ALLOW_DRIFT}
 
 # ---------------------------------------------------------------------------
 # Load results
