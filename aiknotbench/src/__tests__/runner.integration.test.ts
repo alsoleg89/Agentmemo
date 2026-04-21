@@ -132,6 +132,7 @@ describe("runBenchmark integration", () => {
       answerModelName: "mock-answer",
       aiKnotCommand: "mock-ai-knot-mcp",
       locomoFile: MOCK_LOCOMO_PATH,
+      allowDrift: true,
       _evaluatorOverride: {
         answerFn: mockAnswerFn,
         judgeFn: mockJudgeFn,
@@ -181,6 +182,7 @@ describe("runBenchmark integration", () => {
       answerModelName: "mock",
       aiKnotCommand: "mock",
       locomoFile: MOCK_LOCOMO_PATH,
+      allowDrift: true,
       _evaluatorOverride: overrides,
     });
 
@@ -196,6 +198,7 @@ describe("runBenchmark integration", () => {
       answerModelName: "mock",
       aiKnotCommand: "mock",
       locomoFile: MOCK_LOCOMO_PATH,
+      allowDrift: true,
       _evaluatorOverride: overrides,
     });
 
@@ -234,6 +237,7 @@ describe("runBenchmark integration", () => {
       answerModelName: "mock",
       aiKnotCommand: "mock",
       locomoFile: MOCK_LOCOMO_PATH,
+      allowDrift: true,
       _evaluatorOverride: overrides,
     });
 
@@ -248,6 +252,7 @@ describe("runBenchmark integration", () => {
       answerModelName: "mock",
       aiKnotCommand: "mock",
       locomoFile: MOCK_LOCOMO_PATH,
+      allowDrift: true,
       force: true,
       _evaluatorOverride: overrides,
     });

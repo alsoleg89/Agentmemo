@@ -14,9 +14,10 @@ describe("computeReport", () => {
   const report = computeReport("test-run", "gpt-4o-mini", "gpt-4o", RESULTS);
 
   it("summary totals are correct", () => {
-    expect(report.summary.total).toBe(6);
-    expect(report.summary.correct).toBe(4);
-    expect(report.summary.accuracy).toBeCloseTo(4 / 6);
+    // summary excludes cat5 (adversarial); only cat1-4 counted here
+    expect(report.summary.total).toBe(5);
+    expect(report.summary.correct).toBe(3);
+    expect(report.summary.accuracy).toBeCloseTo(3 / 5);
   });
 
   it("byType has correct counts", () => {

@@ -23,6 +23,7 @@ export interface RunArgs {
   ingestMode: IngestMode;
   aiKnotEnv: Record<string, string>;
   force: boolean;
+  allowDrift: boolean;
 }
 
 export interface ListArgs {
@@ -53,6 +54,7 @@ function parseRunArgs(args: string[]): RunArgs {
   let ingestMode: IngestMode = "dated";
   const aiKnotEnv: Record<string, string> = {};
   let force = false;
+  let allowDrift = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -103,6 +105,8 @@ function parseRunArgs(args: string[]): RunArgs {
       i++;
     } else if (a === "--force") {
       force = true;
+    } else if (a === "--allow-drift") {
+      allowDrift = true;
     }
   }
 
@@ -111,7 +115,7 @@ function parseRunArgs(args: string[]): RunArgs {
     process.exit(1);
   }
 
-  return { command: "run", runId, judgeModel, answerModel, limit, convs, sample, types, topK, maxTurns, ingestMode, aiKnotEnv, force };
+  return { command: "run", runId, judgeModel, answerModel, limit, convs, sample, types, topK, maxTurns, ingestMode, aiKnotEnv, force, allowDrift };
 }
 
 function parseListArgs(args: string[]): ListArgs {
@@ -151,6 +155,7 @@ Run options:
   --ingest-mode <m>    Ingestion mode: dated (default). LLM mode "dated-learn" coming in v2.
   --knot-env K=V       Pass env var to ai-knot-mcp (repeatable)
   --force              Delete existing run data and start fresh
+  --allow-drift        Proceed even if settings deviate from canonical.json (results not baseline-comparable)
 
 Examples:
   bun run src/index.ts run -r quick --limit 2 --types 1,2
@@ -208,6 +213,7 @@ async function main(): Promise<void> {
     maxTurns,
     aiKnotEnv,
     force,
+    allowDrift,
   } = parsed;
 
   await runBenchmark({
@@ -226,6 +232,7 @@ async function main(): Promise<void> {
     sample,
     types,
     force,
+    allowDrift,
   });
 }
 

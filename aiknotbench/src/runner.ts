@@ -1,3 +1,5 @@
+import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -7,12 +9,20 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LanguageModelV1 } from "ai";
 
 import { AiknotAdapter } from "./aiknot.js";
 import type { IngestMode } from "./aiknot.js";
+import {
+  diffAgainstCanonical,
+  hashCanonical,
+  loadCanonical,
+  requireNoDrift,
+  resolveRunConfig,
+} from "./config_snapshot.js";
+import type { ResolvedRunConfig } from "./config_snapshot.js";
 import { answerQuestion, judgeAnswer } from "./evaluator.js";
 import type { Verdict, Usage } from "./evaluator.js";
 import { filterQA, loadDataset } from "./locomo.js";
@@ -48,6 +58,71 @@ function dbPath(runId: string): string {
   return resolve(runDir(runId), "knot.db");
 }
 
+function runConfigPath(runId: string): string {
+  return resolve(runDir(runId), "run_config.json");
+}
+
+// ---- Git + dataset helpers --------------------------------------------------
+
+interface GitInfo {
+  sha: string;
+  dirty: boolean;
+}
+
+function getGitInfo(repoPath: string): GitInfo {
+  try {
+    const sha = execSync("git rev-parse HEAD", { cwd: repoPath, stdio: ["ignore", "pipe", "ignore"] })
+      .toString().trim();
+    const dirty = execSync("git status --porcelain", { cwd: repoPath, stdio: ["ignore", "pipe", "ignore"] })
+      .toString().trim().length > 0;
+    return { sha, dirty };
+  } catch {
+    return { sha: "unknown", dirty: false };
+  }
+}
+
+function hashFileContents(filePath: string): string {
+  try {
+    const bytes = readFileSync(filePath);
+    return createHash("sha256").update(bytes).digest("hex");
+  } catch {
+    return "unknown";
+  }
+}
+
+// ---- RunConfig (written once, immutable per run) ----------------------------
+
+interface RunConfig {
+  runId: string;
+  startedAt: string;
+  git: {
+    aiKnotSha: string;
+    aiKnotDirty: boolean;
+    aiknotbenchSha: string;
+    aiknotbenchDirty: boolean;
+  };
+  config: {
+    canonicalSha: string;
+    deviations: string[];
+    resolved: ResolvedRunConfig;
+  };
+  dataset: {
+    path: string;
+    sha256: string;
+    convs: number[];
+  };
+}
+
+function writeRunConfig(runId: string, rc: RunConfig): void {
+  writeFileSync(runConfigPath(runId), JSON.stringify(rc, null, 2));
+}
+
+function loadRunConfig(runId: string): RunConfig | null {
+  const p = runConfigPath(runId);
+  if (!existsSync(p)) return null;
+  return JSON.parse(readFileSync(p, "utf-8")) as RunConfig;
+}
+
 // ---- Checkpoint schema ------------------------------------------------------
 
 interface CheckpointResult {
@@ -59,12 +134,15 @@ interface CheckpointResult {
 
 interface Checkpoint {
   runId: string;
-  judgeModel: string;
-  answerModel: string;
+  /** @deprecated moved to run_config.json */
+  judgeModel?: string;
+  /** @deprecated moved to run_config.json */
+  answerModel?: string;
   startedAt: string;
   updatedAt: string;
   ingested: number[];
   results: CheckpointResult[];
+  /** @deprecated moved to run_config.json */
   ingestMode?: IngestMode;
 }
 
@@ -96,13 +174,38 @@ export interface Report {
   adversarial?: TypeStat;      // cat5 separate (inverse-signal)
   byType: Record<string, TypeStat>;
   categories1to4: TypeStat;
+  git?: {
+    aiKnotSha: string;
+    aiKnotDirty: boolean;
+    aiknotbenchSha: string;
+    aiknotbenchDirty: boolean;
+  };
+  config?: {
+    canonicalSha: string;
+    deviations: string[];
+    resolved: ResolvedRunConfig;
+  };
+  dataset?: {
+    path: string;
+    sha256: string;
+    convs: number[];
+  };
+  timings?: {
+    wallClockSec: number;
+    tokensIn: number;
+    tokensOut: number;
+  };
 }
 
 export function computeReport(
   runId: string,
   judgeModel: string,
   answerModel: string,
-  results: CheckpointResult[]
+  results: CheckpointResult[],
+  extras?: {
+    runConfig?: RunConfig | null;
+    timings?: Report["timings"];
+  }
 ): Report {
   const all = results;
   // Cat5 is adversarial ("Not mentioned" gold) — separate from primary summary
@@ -141,6 +244,7 @@ export function computeReport(
     accuracy: cat14.length > 0 ? cat14correct / cat14.length : 0,
   };
 
+  const rc = extras?.runConfig;
   return {
     runId,
     judgeModel,
@@ -150,6 +254,8 @@ export function computeReport(
     ...(adversarial !== undefined ? { adversarial } : {}),
     byType,
     categories1to4,
+    ...(rc ? { git: rc.git, config: rc.config, dataset: rc.dataset } : {}),
+    ...(extras?.timings ? { timings: extras.timings } : {}),
   };
 }
 
@@ -231,6 +337,7 @@ export interface RunOptions extends LoadOptions {
   convs?: number[];
   sample?: number;
   force?: boolean;
+  allowDrift?: boolean;
   _evaluatorOverride?: Partial<EvaluatorFns>;
 }
 
@@ -252,6 +359,7 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
     convs,
     sample,
     force,
+    allowDrift = false,
     _evaluatorOverride,
   } = opts;
 
@@ -263,18 +371,51 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
 
   mkdirSync(dir, { recursive: true });
 
+  // Write run_config.json once on first start (never mutated on resume)
+  const BENCH_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const AI_KNOT_ROOT = resolve(BENCH_ROOT, "..");
+  if (!existsSync(runConfigPath(runId))) {
+    const resolved = resolveRunConfig(
+      { answerModel: answerModelName, judgeModel: judgeModelName, topK, ingestMode, convs, allowDrift },
+      process.env as NodeJS.ProcessEnv
+    );
+    const deviations = diffAgainstCanonical(resolved);
+    requireNoDrift(deviations, allowDrift);
+    const canonical = loadCanonical();
+    const aiKnotGit = getGitInfo(AI_KNOT_ROOT);
+    const benchGit = getGitInfo(BENCH_ROOT);
+    const rc: RunConfig = {
+      runId,
+      startedAt: new Date().toISOString(),
+      git: {
+        aiKnotSha: aiKnotGit.sha,
+        aiKnotDirty: aiKnotGit.dirty,
+        aiknotbenchSha: benchGit.sha,
+        aiknotbenchDirty: benchGit.dirty,
+      },
+      config: {
+        canonicalSha: hashCanonical(),
+        deviations,
+        resolved,
+      },
+      dataset: {
+        path: canonical.dataset.path,
+        sha256: hashFileContents(resolve(BENCH_ROOT, canonical.dataset.path)),
+        convs: convs ?? canonical.dataset.convs_default,
+      },
+    };
+    writeRunConfig(runId, rc);
+  }
+
   // Load or create checkpoint
   let cp = loadCheckpoint(runId);
   if (!cp) {
     cp = {
       runId,
-      judgeModel: judgeModelName,
-      answerModel: answerModelName,
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       ingested: [],
       results: [],
-      ingestMode,
     };
     saveCheckpoint(cp);
   }
@@ -298,6 +439,11 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
   for (const conv of dataset) {
     totalWork += filterQA(conv.qa, types, sample).length;
   }
+
+  // Timing accumulators
+  const wallStart = Date.now();
+  let tokensIn = 0;
+  let tokensOut = 0;
 
   const pad = String(dataset.length).length;
   console.log(
@@ -360,6 +506,8 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
           answer,
           qa.answer
         );
+        tokensIn += answerUsage.promptTokens + judgeUsage.promptTokens;
+        tokensOut += answerUsage.completionTokens + judgeUsage.completionTokens;
 
         cp!.results.push({
           convIdx: conv.idx,
@@ -407,7 +555,11 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
     runId,
     judgeModelName,
     answerModelName,
-    cp.results
+    cp.results,
+    {
+      runConfig: loadRunConfig(runId),
+      timings: { wallClockSec: (Date.now() - wallStart) / 1000, tokensIn, tokensOut },
+    }
   );
   writeFileSync(reportPath(runId), JSON.stringify(report, null, 2));
 
