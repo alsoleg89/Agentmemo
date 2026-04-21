@@ -61,6 +61,8 @@ _PROFILE_CAPS: dict[str, _CapSet] = {
         window_dedup_cap=24,
         collect_cap=15,
         render_top_k=12,
+        # justification: long-form conversational evidence; at ~1200 chars/turn
+        # a 15-turn retrieval window needs ~18K chars — 22K gives safe margin.
         char_budget=22_000,
         per_turn_max=1200,
     ),

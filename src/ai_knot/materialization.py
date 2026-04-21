@@ -236,7 +236,7 @@ _FP_EVENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "visited",
         re.compile(
-            r"^I\s+(?:visited?|stopped\s+by|went\s+to\s+(?:the\s+|a\s+)?(?:store|park|gym|hospital|restaurant|museum|gallery|library|cafe|office|campus|school|university))\s*(.{0,60})\.?\s*$",
+            r"^I\s+(?:visited?|stopped\s+by|went\s+to)\s+(.+?)\.?\s*$",
             re.IGNORECASE,
         ),
     ),
@@ -255,7 +255,7 @@ _FP_EVENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "ran",
         re.compile(
-            r"^I\s+(?:ran?|completed?\s+(?:a\s+|the\s+)?(?:5k|10k|marathon|half[\s-]marathon|race|run))\s*(.{0,60})\.?\s*$",
+            r"^I\s+(?:ran?|completed?\s+(?:a\s+|the\s+)?(?:run|race|event|course|circuit))\s+(.+?)\.?\s*$",
             re.IGNORECASE,
         ),
     ),

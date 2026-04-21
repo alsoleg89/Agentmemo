@@ -64,6 +64,10 @@ RELATION_VERBS: frozenset[str] = frozenset(
         "ran",
         "created",
         "spoke_at",
+        # first-person event relations added in v6
+        "acquired",
+        "became",
+        "activity_ongoing",
     }
 )
 
