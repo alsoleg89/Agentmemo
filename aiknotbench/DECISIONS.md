@@ -136,6 +136,25 @@ bench settings must have a paired entry here before it lands on the branch.
 
 ---
 
+## 2026-04-21 — Move 1A per-session MMR floor=2 for SET (REVERTED, gate-e4488e7 baseline)
+
+**Commit:** not committed — reverted before merge on `feature/configurable-mcp-env-v0.9.4`
+**Baseline:** `gate-e4488e7-2conv` — canonical (gpt-4o-mini × gpt-4o-mini), cat1 25.6 %, cat1-4 59.7 %
+**Run:** `data/runs/p1-1a-2conv/report.json` — canonical, same models, same dataset
+**Config deviations:** none
+**Decision:** REVERT — target category regressed
+**Reason:** Hypothesis was that SET-type cat1 Q (e.g. "Where has Melanie camped?") with multi-session evidence lose coverage under floor=1. Bumped floor to 2 per session when SET query + ≥2 unique sessions in candidate pool (`_set_query_floor` helper in `storage/sqlite_storage.py`). Net effect on cat1: -2.3 pp (11/43 → 10/43), with **zero gains** and one new regression (Q 0:71 "What book did Melanie read from Caroline's suggestion?" — the floor pushed the session containing "Becoming Nicole" evidence out of render_top_k in favor of lower-quality cross-session matches). Hypothesis was wrong for single-answer SET queries: diversity hurts when one session has the ground-truth. Needs narrower trigger (only true multi-answer SET queries).
+**1A numbers (canonical gpt-4o-mini × gpt-4o-mini):**
+  - cat1: 23.3 % (−2.3 pp ⚠ target regressed with zero gains)
+  - cat2: 50.8 % (±0)
+  - cat3: 61.5 % (−7.7 pp, 1 Q of 13 — sample noise)
+  - cat4: 79.8 % (+3.5 pp, unrelated benefit — floor happens to diversify non-SET too)
+  - cat5: 23.9 % (−4.2 pp, floor above stop-rule 20 %)
+  - cat1-4 aggregate: 60.5 % (+0.9 pp — floors held but target failed)
+**Next baseline update:** no (reverted; baseline remains `gate-e4488e7-2conv`)
+
+---
+
 ## Known bad artifacts
 
 ### `data/runs/ddsa-off/`
