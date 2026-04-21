@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 import ai_knot.support_retrieval as _sr
@@ -30,6 +30,42 @@ from ai_knot.query_types import (
     SupportBundle,
     TimeAxis,
 )
+
+# ---------------------------------------------------------------------------
+# Query profile (caps knob)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _CapSet:
+    raw_search_top_k: int      # top_k for search_episodes_by_entities
+    window_dedup_cap: int      # max unique episode IDs from window expansion
+    collect_cap: int           # cap for _collect_evidence_episode_ids
+    render_top_k: int          # max episodes rendered to evidence_text
+    char_budget: int           # max bytes in evidence_text
+    per_turn_max: int          # max chars per individual turn in evidence
+
+
+_PROFILE_CAPS: dict[str, _CapSet] = {
+    "narrow": _CapSet(
+        raw_search_top_k=5, window_dedup_cap=8, collect_cap=5,
+        render_top_k=5, char_budget=8_000, per_turn_max=400,
+    ),
+    "balanced": _CapSet(
+        raw_search_top_k=20, window_dedup_cap=24, collect_cap=15,
+        render_top_k=12, char_budget=22_000, per_turn_max=1200,
+    ),
+    "wide": _CapSet(
+        raw_search_top_k=40, window_dedup_cap=48, collect_cap=25,
+        render_top_k=20, char_budget=36_000, per_turn_max=2000,
+    ),
+}
+
+
+def _get_caps() -> _CapSet:
+    profile = os.environ.get("AIKNOT_QUERY_PROFILE", "balanced")
+    return _PROFILE_CAPS.get(profile, _PROFILE_CAPS["balanced"])
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -109,17 +145,18 @@ def execute_query(
 
     # 7b. Raw-episode search for evidence_text enrichment.
     #
-    # Always runs when focus_entities are known.  Each hit is expanded to a
-    # 3-turn window (prev → center → next) so the answer-model LLM sees full
-    # conversational context, not just the matching turn.  Cap: ≤ 8 unique
-    # episode ids (covers ~5 overlapping windows before context budget is hit).
-    # _collect_evidence_episode_ids uses raw-search as fallback (items → claims → search).
+    # Each hit is expanded to a 3-turn window (prev → center → next) so the
+    # answer-model LLM sees full conversational context.
+    # Caps are controlled by AIKNOT_QUERY_PROFILE (narrow/balanced/wide).
+    caps = _get_caps()
     episode_search_ids: list[str] = []
     if frame.focus_entities:
         search_fn = getattr(storage, "search_episodes_by_entities", None)
         if search_fn is not None:
-            eps = search_fn(agent_id, frame.focus_entities, query=question, top_k=5)
-            # Expand each hit to a 3-turn window: prev → center → next (dedupe, cap 8).
+            eps = search_fn(
+                agent_id, frame.focus_entities, query=question,
+                top_k=caps.raw_search_top_k,
+            )
             seen: set[str] = set()
             window_ids: list[str] = []
             for hit in eps:
@@ -131,9 +168,9 @@ def execute_query(
                     if eid is not None and eid not in seen:
                         seen.add(eid)
                         window_ids.append(eid)
-                        if len(window_ids) >= 8:
+                        if len(window_ids) >= caps.window_dedup_cap:
                             break
-                if len(window_ids) >= 8:
+                if len(window_ids) >= caps.window_dedup_cap:
                     break
             episode_search_ids = window_ids
             if episode_search_ids:
@@ -143,8 +180,15 @@ def execute_query(
     text = _render_text(answer_items, contract)
 
     # 8b. Build evidence_text for downstream LLM context.
-    ep_ids = _collect_evidence_episode_ids(answer_items, claims, episode_search_ids)
-    evidence_text = _render_evidence_context(storage, agent_id, ep_ids)
+    ep_ids = _collect_evidence_episode_ids(
+        answer_items, claims, episode_search_ids, cap=caps.collect_cap
+    )
+    evidence_text = _render_evidence_context(
+        storage, agent_id, ep_ids,
+        top_k=caps.render_top_k,
+        char_budget=caps.char_budget,
+        per_turn_max=caps.per_turn_max,
+    )
 
     # 9. Build trace.
     latency_ms = (time.monotonic() - t0) * 1000.0
@@ -320,6 +364,8 @@ def _render_evidence_context(
     agent_id: str,
     episode_ids: list[str],
     top_k: int = 5,
+    char_budget: int = 8_000,
+    per_turn_max: int = 400,
 ) -> str:
     """Format episodes as '[N] [YYYY-MM-DD] Speaker: raw_text', newline-joined.
 
@@ -328,9 +374,11 @@ def _render_evidence_context(
     - Missing speaker → no speaker label.
     - If raw_text already starts with 'Speaker:', do NOT double-prefix.
     - Missing/not-found episode → silently skip.
+    - Individual turns truncated to per_turn_max chars; total capped at char_budget.
     """
     parts: list[str] = []
     n = 0
+    total_chars = 0
     get_ep = getattr(storage, "get_episode", None)
     if get_ep is None:
         return ""
@@ -348,10 +396,16 @@ def _render_evidence_context(
                 date_part = f"[{ep.session_date.isoformat()}] "
         speaker = getattr(ep, "speaker", None)
         raw = ep.raw_text
+        if len(raw) > per_turn_max:
+            raw = raw[:per_turn_max]
         speaker_part = ""
         if speaker and not raw.lstrip().startswith(f"{speaker}:"):
             speaker_part = f"{speaker}: "
-        parts.append(f"[{n}] {date_part}{speaker_part}{raw}")
+        line = f"[{n}] {date_part}{speaker_part}{raw}"
+        if total_chars + len(line) > char_budget:
+            break
+        parts.append(line)
+        total_chars += len(line) + 1  # +1 for newline
     return "\n".join(parts)
 
 
