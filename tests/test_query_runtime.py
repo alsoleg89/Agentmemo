@@ -467,3 +467,40 @@ def test_priority_path_used_when_raw_search_rich():
     )
     # Raw-search episodes must lead.
     assert result[:5] == episode_search_ids, f"Priority order broken: {result[:5]}"
+
+
+def test_set_caps_widened_vs_scalar():
+    """_caps_for_contract widens funnel for SET, leaves scalar unchanged."""
+    from ai_knot.query_runtime import _PROFILE_CAPS, _caps_for_contract
+    from ai_knot.query_types import (
+        AnswerContract,
+        AnswerSpace,
+        EvidenceRegime,
+        TimeAxis,
+        TruthMode,
+    )
+
+    base = _PROFILE_CAPS["balanced"]
+
+    scalar = AnswerContract(
+        answer_space=AnswerSpace.SCALAR,
+        truth_mode=TruthMode.DIRECT,
+        time_axis=TimeAxis.NONE,
+        locality="point",
+        evidence_regime=EvidenceRegime.SINGLE,
+    )
+    set_ctx = AnswerContract(
+        answer_space=AnswerSpace.SET,
+        truth_mode=TruthMode.DIRECT,
+        time_axis=TimeAxis.NONE,
+        locality="point",
+        evidence_regime=EvidenceRegime.AGGREGATE,
+    )
+
+    assert _caps_for_contract(base, scalar) is base, "Scalar contract must return base unchanged"
+
+    widened = _caps_for_contract(base, set_ctx)
+    assert widened.render_top_k > base.render_top_k, "SET must widen render_top_k"
+    assert widened.char_budget > base.char_budget, "SET must widen char_budget"
+    assert widened.collect_cap > base.collect_cap, "SET must widen collect_cap"
+    assert widened.per_turn_max == base.per_turn_max, "per_turn_max must be unchanged"

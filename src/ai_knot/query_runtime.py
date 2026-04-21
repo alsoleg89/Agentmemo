@@ -83,6 +83,28 @@ def _get_caps() -> _CapSet:
     return _PROFILE_CAPS.get(profile, _PROFILE_CAPS["balanced"])
 
 
+def _caps_for_contract(base: _CapSet, contract: AnswerContract) -> _CapSet:
+    """Widen caps for SET questions — gold answers span many episodes.
+
+    46 % of Cat1 failures are M-type: facts ARE retrieved but the render
+    window is too small to show all of them, so the model lists only a
+    subset.  Every M-type example is a set-valued question (hobbies, pets,
+    events) whose gold answer spans 3-8 episodes.  Widening the render
+    funnel ~50 % for SET answers fixes this without touching scalar/boolean
+    queries which are already well-tuned on the balanced profile.
+    """
+    if contract.answer_space is not AnswerSpace.SET:
+        return base
+    return _CapSet(
+        raw_search_top_k=max(base.raw_search_top_k, 28),
+        window_dedup_cap=max(base.window_dedup_cap, 32),
+        collect_cap=max(base.collect_cap, 22),
+        render_top_k=max(base.render_top_k, 18),
+        char_budget=max(base.char_budget, 30_000),
+        per_turn_max=base.per_turn_max,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -164,7 +186,7 @@ def execute_query(
     # Each hit is expanded to a 3-turn window (prev → center → next) so the
     # answer-model LLM sees full conversational context.
     # Caps are controlled by AIKNOT_QUERY_PROFILE (narrow/balanced/wide).
-    caps = _get_caps()
+    caps = _caps_for_contract(_get_caps(), contract)
     episode_search_ids: list[str] = []
     if frame.focus_entities:
         search_fn = getattr(storage, "search_episodes_by_entities", None)
