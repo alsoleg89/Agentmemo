@@ -80,10 +80,13 @@ def retrieve_bundles(
     if topics and hasattr(bs, "load_bundles_by_topic"):
         bundles = bs.load_bundles_by_topic(agent_id, topics, kinds)
 
-    # 2. Fallback: BM25 augments when no slot bundle and primary is sparse.
+    # 2. Fallback: BM25 only when no slot bundle and primary is very sparse.
+    # Gate kept conservative (<2) to avoid diluting a valid slot bundle with
+    # unrelated fallback claims. Widening to <5 hurt cat1 precision because
+    # BM25 noise claims propagate into joint RRF and pollute scalar-query context.
     has_slot_bundle = any("::" in b.topic for b in bundles)
     fallback_used = False
-    if not has_slot_bundle and len(bundles) < 5 and question:
+    if not has_slot_bundle and len(bundles) < 2 and question:
         fallback = fallback_claim_search(storage, agent_id, question, top_k=top_k)
         if fallback:
             synth = _synthesize_bundles_for_claims(
