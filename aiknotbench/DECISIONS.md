@@ -155,6 +155,25 @@ bench settings must have a paired entry here before it lands on the branch.
 
 ---
 
+## 2026-04-21 — Move 1B leading-adverbial strip for FP patterns
+
+**Commit:** `(pending)` on `feature/configurable-mcp-env-v0.9.4`
+**Baseline:** `gate-e4488e7-2conv` — canonical (gpt-4o-mini × gpt-4o-mini), cat1 25.6 %, cat1-4 59.7 %
+**Run:** `data/runs/p1-1b-2conv/report.json` — canonical (deviations=[]), same models
+**Config deviations:** none
+**Decision:** ACCEPT — all floors held, target gained, no per-cat regression beyond noise
+**Reason:** Added `_LEADING_ADV_RE` + `_strip_leading_adverbial` in `materialization.py` so sentences like "Last weekend I joined X", "Yesterday I bought Y", "Recently I moved to Z" feed the FP regex with `I <verb>` opener. 11 FP call sites (`_FP_LIKES_RE` … `_FP_ACTIVITY_RE` + `_FP_EVENT_PATTERNS` loop) switched from `sent` → `fp_sent`; original `sent` retained for qualifiers, spans, claim IDs. Strip only fires when residue begins with `I\s+\w+` → non-FP sentences with adverbial prefix stay untouched.
+**1B numbers (canonical gpt-4o-mini × gpt-4o-mini):**
+  - cat1: 30.2 % (+4.7 pp ✓ target category gained)
+  - cat2: 50.8 % (±0)
+  - cat3: 69.2 % (±0)
+  - cat4: 80.7 % (+4.4 pp ✓ non-regression; floor 68.1 %)
+  - cat5: 26.8 % (−1.4 pp, within floor 20 % and threshold −8.2 pp)
+  - cat1-4 aggregate: 62.7 % (+3.0 pp ✓ aggregate gate passed)
+**Next baseline update:** yes — `p1-1b-2conv` becomes new baseline for 1C/1D sub-moves
+
+---
+
 ## Known bad artifacts
 
 ### `data/runs/ddsa-off/`

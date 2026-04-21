@@ -215,6 +215,28 @@ _FP_ACTIVITY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Leading adverbial prefixes that hide the "I <verb>" opener required by the
+# first-person patterns above (e.g. "Last weekend I joined ..."). Stripped only
+# when the residue still begins with "I <word>" — so non-FP sentences are left
+# untouched.
+_LEADING_ADV_RE = re.compile(
+    r"^(?:"
+    r"Last\s+\w+"
+    r"|Yesterday"
+    r"|Today"
+    r"|Tonight"
+    r"|Recently"
+    r"|Lately"
+    r"|This\s+(?:morning|afternoon|evening|weekend|week|month|year)"
+    r"|A\s+(?:few|couple\s+of)\s+(?:days|weeks|months|years)\s+ago"
+    r"|Earlier(?:\s+(?:today|this\s+\w+))?"
+    r"|Just\s+(?:now|recently)"
+    r"|Since\s+we\s+last\s+(?:spoke|talked|chatted)"
+    r"|Over\s+the\s+(?:weekend|week|past\s+\w+)"
+    r")\s*,?\s+(?=I\s+\w+)",
+    re.IGNORECASE,
+)
+
 # First-person event/action patterns (used when speaker is known).
 # Each entry: relation_name → compiled regex.
 _FP_EVENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
@@ -443,6 +465,18 @@ def _is_garbage_sentence(sent: str) -> bool:
     return first in _SENT_GARBAGE_OPENERS
 
 
+def _strip_leading_adverbial(sent: str) -> str:
+    """Drop a leading temporal adverbial so the remainder starts with "I <verb>".
+
+    Returns the original sentence when the residue would not start with an
+    I-opener — leaves non-FP sentences untouched.
+    """
+    m = _LEADING_ADV_RE.match(sent)
+    if not m:
+        return sent
+    return sent[m.end() :]
+
+
 def _extract_from_sentence(
     sent: str,
     raw: RawEpisode,
@@ -456,7 +490,11 @@ def _extract_from_sentence(
 
     # --- FIRST-PERSON PREFERENCE (requires named speaker) ----------------
     if speaker and speaker not in _PRONOUN_SUBJECTS:
-        m = _FP_LIKES_RE.match(sent)
+        # Strip leading temporal adverbials ("Last weekend, I ...") so patterns
+        # that require "^I\s+<verb>" still match. Original `sent` is retained
+        # for qualifiers, spans, and claim IDs so source attribution is stable.
+        fp_sent = _strip_leading_adverbial(sent)
+        m = _FP_LIKES_RE.match(fp_sent)
         if m:
             claim_id = _make_claim_id(raw.id, f"likes:{sent[:30]}")
             results.append(
@@ -476,7 +514,7 @@ def _extract_from_sentence(
                 )
             )
             return results
-        m = _FP_DISLIKES_RE.match(sent)
+        m = _FP_DISLIKES_RE.match(fp_sent)
         if m:
             claim_id = _make_claim_id(raw.id, f"dislikes:{sent[:30]}")
             results.append(
@@ -496,7 +534,7 @@ def _extract_from_sentence(
                 )
             )
             return results
-        m = _FP_SATISFYING_RE.search(sent)
+        m = _FP_SATISFYING_RE.search(fp_sent)
         if m:
             value = (m.group(1) or m.group(2) or "").strip()
             if value:
@@ -520,7 +558,7 @@ def _extract_from_sentence(
                 return results
 
         # --- FIRST-PERSON SELF-STATE (requires named speaker) -----------------------
-        m = _FP_SELF_STATE_RE.match(sent)
+        m = _FP_SELF_STATE_RE.match(fp_sent)
         if m and speaker and speaker not in _PRONOUN_SUBJECTS:
             value = m.group(1).strip()
             claim_id = _make_claim_id(raw.id, f"self_state:{sent[:30]}")
@@ -543,7 +581,7 @@ def _extract_from_sentence(
             return results
 
         # --- FIRST-PERSON ACTIONS (requires named speaker) ---------------
-        m = _FP_DRIVES_RE.match(sent)
+        m = _FP_DRIVES_RE.match(fp_sent)
         if m:
             claim_id = _make_claim_id(raw.id, f"drives:{sent[:30]}")
             results.append(
@@ -563,7 +601,7 @@ def _extract_from_sentence(
                 )
             )
             return results
-        m = _FP_WORK_RE.match(sent)
+        m = _FP_WORK_RE.match(fp_sent)
         if m:
             claim_id = _make_claim_id(raw.id, f"works_at:{sent[:30]}")
             results.append(
@@ -583,7 +621,7 @@ def _extract_from_sentence(
                 )
             )
             return results
-        m = _FP_WORK_LEFT_RE.match(sent)
+        m = _FP_WORK_LEFT_RE.match(fp_sent)
         if m:
             claim_id = _make_claim_id(raw.id, f"left_job:{sent[:30]}")
             results.append(
@@ -603,7 +641,7 @@ def _extract_from_sentence(
                 )
             )
             return results
-        m = _FP_MOVE_RE.match(sent)
+        m = _FP_MOVE_RE.match(fp_sent)
         if m:
             claim_id = _make_claim_id(raw.id, f"moved_to:{sent[:30]}")
             results.append(
@@ -623,7 +661,7 @@ def _extract_from_sentence(
                 )
             )
             return results
-        m = _FP_STARTED_RE.match(sent)
+        m = _FP_STARTED_RE.match(fp_sent)
         if m:
             claim_id = _make_claim_id(raw.id, f"started:{sent[:30]}")
             results.append(
@@ -643,7 +681,7 @@ def _extract_from_sentence(
                 )
             )
             return results
-        m = _FP_BECAME_RE.match(sent)
+        m = _FP_BECAME_RE.match(fp_sent)
         if m:
             claim_id = _make_claim_id(raw.id, f"became:{sent[:30]}")
             results.append(
@@ -663,7 +701,7 @@ def _extract_from_sentence(
                 )
             )
             return results
-        m = _FP_ACTIVITY_RE.match(sent)
+        m = _FP_ACTIVITY_RE.match(fp_sent)
         if m:
             claim_id = _make_claim_id(raw.id, f"activity:{sent[:30]}")
             results.append(
@@ -686,7 +724,7 @@ def _extract_from_sentence(
 
         # --- FIRST-PERSON EVENTS (requires named speaker) ----------------
         for relation, fp_re in _FP_EVENT_PATTERNS:
-            m = fp_re.match(sent)
+            m = fp_re.match(fp_sent)
             if m:
                 value = m.group(1).strip() if m.lastindex and m.group(1) else sent[:80]
                 qualifiers: dict[str, str] = {

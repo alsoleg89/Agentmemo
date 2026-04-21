@@ -434,3 +434,127 @@ def test_discourse_guard_only_triggers_on_combined_signal():
     )
     claims_ok = materialize_episode(ep_ok)
     assert claims_ok, "Mary has a cool idea should produce a claim"
+
+
+# ---------------------------------------------------------------------------
+# Leading-adverbial strip (Move 1B)
+# ---------------------------------------------------------------------------
+
+
+def test_leading_adverbial_last_weekend_joined():
+    """'Last weekend I joined X' → FP claim with subject=speaker (joined matches _FP_WORK_RE)."""
+    ep = _make_raw_fp("Last weekend I joined a hiking club.", "Melanie")
+    claims = materialize_episode(ep)
+    # "joined" matches _FP_WORK_RE first → emits works_at relation.
+    fp = [
+        c
+        for c in claims
+        if c.subject == "Melanie" and "hiking club" in c.value_text.lower()
+    ]
+    assert fp, (
+        f"Expected FP claim for Melanie after adverbial strip, got: "
+        f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+    )
+
+
+def test_leading_adverbial_yesterday_bought():
+    """'Yesterday I bought X' → bought claim with subject=speaker."""
+    ep = _make_raw_fp("Yesterday I bought a new bicycle.", "Dave")
+    claims = materialize_episode(ep)
+    bought = [c for c in claims if c.relation == "bought" and c.subject == "Dave"]
+    assert bought, (
+        f"Expected bought claim for Dave, got: "
+        f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+    )
+    assert "bicycle" in bought[0].value_text.lower()
+
+
+def test_leading_adverbial_recently_moved():
+    """'Recently I moved to X' → moved_to claim with subject=speaker."""
+    ep = _make_raw_fp("Recently I moved to Berlin.", "Alice")
+    claims = materialize_episode(ep)
+    moved = [c for c in claims if c.relation == "moved_to" and c.subject == "Alice"]
+    assert moved, (
+        f"Expected moved_to claim for Alice, got: "
+        f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+    )
+    assert "berlin" in moved[0].value_text.lower()
+
+
+def test_leading_adverbial_with_comma():
+    """Comma after the adverbial: 'Last weekend, I joined X' still strips."""
+    ep = _make_raw_fp("Last weekend, I joined a book club.", "Bob")
+    claims = materialize_episode(ep)
+    fp = [c for c in claims if c.subject == "Bob" and "book club" in c.value_text.lower()]
+    assert fp, (
+        f"Expected FP claim for Bob (comma case), got: "
+        f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+    )
+
+
+def test_leading_adverbial_over_the_weekend_attended():
+    """'Over the weekend I attended X' → attended claim with subject=speaker."""
+    ep = _make_raw_fp("Over the weekend I attended a yoga retreat.", "Carol")
+    claims = materialize_episode(ep)
+    attended = [c for c in claims if c.relation == "attended" and c.subject == "Carol"]
+    assert attended, (
+        f"Expected attended claim for Carol, got: "
+        f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+    )
+
+
+def test_leading_adverbial_a_few_days_ago():
+    """'A few days ago I met with X' → met_with claim with subject=speaker."""
+    ep = _make_raw_fp("A few days ago I met with my old professor.", "Frank")
+    claims = materialize_episode(ep)
+    met = [c for c in claims if c.relation == "met_with" and c.subject == "Frank"]
+    assert met, (
+        f"Expected met_with claim for Frank, got: "
+        f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+    )
+
+
+def test_leading_adverbial_non_fp_unchanged():
+    """Adverbial on a non-FP sentence: no strip, no FP claim emitted."""
+    # Residue after adverbial does not start with "I <verb>" → strip leaves it alone
+    ep = _make_raw_fp("Last weekend was pretty uneventful.", "Dana")
+    claims = materialize_episode(ep)
+    fp_relations = {"joined", "bought", "attended", "visited", "moved_to", "drives"}
+    fp_claims = [c for c in claims if c.relation in fp_relations and c.subject == "Dana"]
+    assert not fp_claims, (
+        f"Non-FP sentence with adverbial should not produce FP claim, got: "
+        f"{[(c.subject, c.relation, c.value_text) for c in fp_claims]}"
+    )
+
+
+def test_leading_adverbial_no_effect_without_prefix():
+    """No adverbial: existing 'I joined X' path still works unchanged."""
+    ep = _make_raw_fp("I joined a running club.", "Eve")
+    claims = materialize_episode(ep)
+    fp = [c for c in claims if c.subject == "Eve" and "running club" in c.value_text.lower()]
+    assert fp, (
+        f"Expected FP claim for Eve without adverbial, got: "
+        f"{[(c.subject, c.relation, c.value_text) for c in claims]}"
+    )
+
+
+def test_strip_leading_adverbial_helper():
+    """Direct test of the strip helper: positive, negative, and idempotent cases."""
+    from ai_knot.materialization import _strip_leading_adverbial
+
+    # Strips when residue is I-opener
+    assert _strip_leading_adverbial("Last weekend I joined a club.") == "I joined a club."
+    assert _strip_leading_adverbial("Yesterday I bought a book.") == "I bought a book."
+    assert _strip_leading_adverbial("Recently, I moved to Paris.") == "I moved to Paris."
+    assert (
+        _strip_leading_adverbial("Over the weekend I attended a workshop.")
+        == "I attended a workshop."
+    )
+    # Case-insensitive
+    assert _strip_leading_adverbial("YESTERDAY I bought a book.") == "I bought a book."
+    # No strip when residue is not an I-opener
+    assert _strip_leading_adverbial("Last weekend was great.") == "Last weekend was great."
+    # No strip when no adverbial prefix at all
+    assert _strip_leading_adverbial("I joined a club.") == "I joined a club."
+    # No strip when residue is "In the park" — matches Last \w+ but lookahead fails
+    assert _strip_leading_adverbial("Tonight the team won.") == "Tonight the team won."
