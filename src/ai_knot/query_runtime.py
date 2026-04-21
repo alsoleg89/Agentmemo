@@ -192,14 +192,26 @@ def execute_query(
         search_fn = getattr(storage, "search_episodes_by_entities", None)
         if search_fn is not None:
             diversity = contract.answer_space is AnswerSpace.SET
-            eps = search_fn(
+            scored_eps = search_fn(
                 agent_id,
                 frame.focus_entities,
                 query=question,
                 top_k=caps.raw_search_top_k,
                 diversity=diversity,
             )
-            episode_search_ids = _expand_centers_first(eps, caps.window_dedup_cap)
+            exhaustive_eps = search_fn(
+                agent_id,
+                frame.focus_entities,
+                query="",
+                top_k=caps.raw_search_top_k,
+            )
+            merged_seen: set[str] = set()
+            merged: list[Any] = []
+            for hit in list(scored_eps) + list(exhaustive_eps):
+                if hit.id not in merged_seen:
+                    merged_seen.add(hit.id)
+                    merged.append(hit)
+            episode_search_ids = _expand_centers_first(merged, caps.window_dedup_cap)
             if episode_search_ids:
                 profile = replace(profile, episode_fallback_used=True)
 
