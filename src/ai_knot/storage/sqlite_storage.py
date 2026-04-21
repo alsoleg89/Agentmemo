@@ -6,6 +6,7 @@ import array
 import json
 import logging
 import os
+import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -18,6 +19,83 @@ from ai_knot.storage.base import parse_datetime as _parse_datetime
 from ai_knot.types import Fact, MemoryType, MESIState, SlotDelta
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# MMR diversity helpers for search_episodes_by_entities
+# ---------------------------------------------------------------------------
+
+
+def _get_mmr_beta() -> float:
+    return float(os.environ.get("AI_KNOT_MMR_BETA", "0.3"))
+
+
+def _get_per_session_floor() -> int:
+    return int(os.environ.get("AI_KNOT_PER_SESSION_FLOOR", "1"))
+
+
+def _per_session_floor(ranked_ids: list[str], eps_by_id: dict[str, Any]) -> list[str]:
+    """Guarantee ≥ n_floor episodes per session_id appear early in the ranking."""
+    n_floor = _get_per_session_floor()
+    seen: dict[str, list[str]] = {}
+    for rid in ranked_ids:
+        ep = eps_by_id.get(rid)
+        sid = getattr(ep, "session_id", rid) if ep is not None else rid
+        seen.setdefault(sid, []).append(rid)
+    floor: list[str] = []
+    for sid_ids in seen.values():
+        floor.extend(sid_ids[:n_floor])
+    floor_set = set(floor)
+    rest = [r for r in ranked_ids if r not in floor_set]
+    return floor + rest
+
+
+def _tokenize_simple(text: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", (text or "").lower()))
+
+
+def _mmr_sim(ep_a: Any, ep_b: Any) -> float:
+    """MMR pairwise similarity: 0.7 × same_session + 0.3 × jaccard_tokens."""
+    same_session = float(getattr(ep_a, "session_id", None) == getattr(ep_b, "session_id", None))
+    toks_a = _tokenize_simple(getattr(ep_a, "raw_text", ""))
+    toks_b = _tokenize_simple(getattr(ep_b, "raw_text", ""))
+    union = toks_a | toks_b
+    jaccard = len(toks_a & toks_b) / max(1, len(union))
+    return 0.7 * same_session + 0.3 * jaccard
+
+
+def _mmr_rerank(
+    ranked_ids: list[str],
+    eps_by_id: dict[str, Any],
+    k: int,
+    beta: float = 0.3,
+) -> list[str]:
+    """MMR rerank: balance relevance (BM25 rank) and diversity (pairwise sim)."""
+    if not ranked_ids:
+        return []
+    n = len(ranked_ids)
+    selected = [ranked_ids[0]]
+    remaining = list(ranked_ids[1:])
+    while remaining and len(selected) < k:
+        best: str | None = None
+        best_score = -1e9
+        for rid in remaining:
+            rel = 1.0 - ranked_ids.index(rid) / n
+            sel_eps = [eps_by_id[s] for s in selected if s in eps_by_id]
+            r_ep = eps_by_id.get(rid)
+            max_sim = (
+                max((_mmr_sim(r_ep, s_ep) for s_ep in sel_eps), default=0.0)
+                if r_ep is not None
+                else 0.0
+            )
+            score = (1.0 - beta) * rel - beta * max_sim
+            if score > best_score:
+                best, best_score = rid, score
+        if best is None:
+            break
+        selected.append(best)
+        remaining.remove(best)
+    return selected
 
 
 def _serialize_vec(vec: list[float]) -> bytes:
@@ -751,6 +829,7 @@ class SQLiteStorage:
         *,
         query: str = "",
         top_k: int = 5,
+        diversity: bool = False,
     ) -> list[Any]:
         """Entity-filtered raw-episode search with hybrid BM25+embedding RRF ranking.
 
@@ -761,6 +840,10 @@ class SQLiteStorage:
         Sub-step B: when embedding is configured (non-empty URL), fuses BM25 and
         cosine rankings with RRF weights [2.0, 1.0].  Empty-string URL disables
         hybrid (test-mode override); production env always resolves to a URL.
+
+        Sub-step C (optional): when diversity=True, applies per-session floor + MMR
+        reranking to ensure diverse coverage across sessions (useful for SET
+        queries like "Which books has X read?").
         """
         if not entities:
             return []
@@ -936,19 +1019,27 @@ class SQLiteStorage:
                 scored_cos.sort(key=lambda t: t[1], reverse=True)
                 embed_ranked_ids = [eid for eid, _ in scored_cos]
 
+        eps_by_id = {ep.id: ep for ep in episodes}
+
         if embed_ranked_ids:
             from ai_knot._bm25 import _rrf_fuse
 
             fused = _rrf_fuse([bm25_ranked_ids, embed_ranked_ids], weights=[2.0, 1.0])
-            eps_by_id = {ep.id: ep for ep in episodes}
-            top_ids = sorted(
+            pre_div_ids = sorted(
                 (eid for eid in fused if eid in eps_by_id),
                 key=lambda i: (fused[i], _recency(eps_by_id[i])),
                 reverse=True,
-            )[:top_k]
-            return [_make_hit(eps_by_id[i]) for i in top_ids]
+            )
+            if diversity and len(pre_div_ids) > 1:
+                pre_div_ids = _per_session_floor(pre_div_ids, eps_by_id)
+                pre_div_ids = _mmr_rerank(pre_div_ids, eps_by_id, k=top_k, beta=_get_mmr_beta())
+            return [_make_hit(eps_by_id[i]) for i in pre_div_ids[:top_k]]
 
-        return [_make_hit(ep) for ep, _w, _c in ranked[:top_k]]
+        bm25_ids = [ep.id for ep, _w, _c in ranked]
+        if diversity and len(bm25_ids) > 1:
+            bm25_ids = _per_session_floor(bm25_ids, eps_by_id)
+            bm25_ids = _mmr_rerank(bm25_ids, eps_by_id, k=top_k, beta=_get_mmr_beta())
+        return [_make_hit(eps_by_id[i]) for i in bm25_ids[:top_k] if i in eps_by_id]
 
     # ------------------------------------------------------------------ #
     # ClaimStore (v2)

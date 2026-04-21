@@ -393,3 +393,77 @@ def test_evidence_ids_raw_search_first():
     assert result[0] == "ep_raw_1", f"Raw-search episode should be first, got {result}"
     assert "ep_claim_only" in result
     assert result.index("ep_raw_1") < result.index("ep_claim_only")
+
+
+# ---------------------------------------------------------------------------
+# Conditional joint RRF: sparse vs rich raw-search paths
+# ---------------------------------------------------------------------------
+
+
+def test_joint_rrf_used_when_raw_search_sparse():
+    """When raw-search has < 5 hits, joint RRF must fuse claim+item signals."""
+    from datetime import UTC, datetime
+
+    from ai_knot.query_runtime import _joint_rerank_episodes
+    from ai_knot.query_types import AnswerItem, ClaimKind
+
+    now = datetime(2026, 4, 21, tzinfo=UTC)
+
+    # Only 1 raw-search hit — sparse case should trigger joint RRF.
+    episode_search_ids = ["ep_raw_only"]
+    items = [
+        AnswerItem(
+            value="v1",
+            confidence=0.9,
+            source_claim_ids=("c1",),
+            source_episode_ids=("ep_item_a",),
+        )
+    ]
+    claims = [
+        _make_claim("c2", ClaimKind.STATE, "Alice", "likes", "x", "ep_claim_a", now, {}),
+    ]
+
+    result = _joint_rerank_episodes(
+        items,  # type: ignore[arg-type]
+        claims,  # type: ignore[arg-type]
+        episode_search_ids,
+        cap=5,
+    )
+    # All three sources should contribute to the fused result.
+    assert "ep_raw_only" in result
+    assert "ep_item_a" in result
+    assert "ep_claim_a" in result
+    assert len(result) == len(set(result)), "No duplicates expected"
+
+
+def test_priority_path_used_when_raw_search_rich():
+    """When raw-search has >= 5 hits, priority-order collection preserves raw-search first."""
+    from datetime import UTC, datetime
+
+    from ai_knot.query_runtime import _collect_evidence_episode_ids
+    from ai_knot.query_types import AnswerItem, ClaimKind
+
+    now = datetime(2026, 4, 21, tzinfo=UTC)
+
+    # 5 raw-search hits — rich case should use priority order.
+    episode_search_ids = [f"ep_raw_{i}" for i in range(5)]
+    items = [
+        AnswerItem(
+            value="v1",
+            confidence=0.9,
+            source_claim_ids=("c1",),
+            source_episode_ids=("ep_item_only",),
+        )
+    ]
+    claims = [
+        _make_claim("c2", ClaimKind.STATE, "Alice", "likes", "x", "ep_claim_only", now, {}),
+    ]
+
+    result = _collect_evidence_episode_ids(
+        items,  # type: ignore[arg-type]
+        claims,  # type: ignore[arg-type]
+        episode_search_ids=episode_search_ids,
+        cap=10,
+    )
+    # Raw-search episodes must lead.
+    assert result[:5] == episode_search_ids, f"Priority order broken: {result[:5]}"

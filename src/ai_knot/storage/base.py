@@ -184,6 +184,7 @@ class RawEpisodeStore(Protocol):
         *,
         query: str = "",
         top_k: int = 5,
+        diversity: bool = False,
     ) -> list[Any]:
         """Optional: substring/FTS lookup by entity mentions, ranked by query overlap."""
         ...

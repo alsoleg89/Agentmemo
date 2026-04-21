@@ -14,6 +14,8 @@
     "ddsa_enabled": false,
     "ingest_mode": "dated",
     "llm_recall": false,
+    "mmr_beta": 0.3,
+    "per_session_floor": 1,
     "profile": "balanced",
     "rrf_weights": [1.0, 1.0],
     "top_k": 60
@@ -33,6 +35,8 @@
     "AI_KNOT_DB_PATH",
     "AI_KNOT_EMBED_MODEL",
     "AI_KNOT_EMBED_URL",
+    "AI_KNOT_MMR_BETA",
+    "AI_KNOT_PER_SESSION_FLOOR",
     "AI_KNOT_PROVIDER",
     "AIKNOT_DEBUG_TRACE",
     "AIKNOT_QUERY_PROFILE",

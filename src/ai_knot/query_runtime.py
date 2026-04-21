@@ -23,6 +23,7 @@ from ai_knot.query_operators import OPERATORS, choose_strategy
 from ai_knot.query_types import (
     AnswerContract,
     AnswerItem,
+    AnswerSpace,
     AnswerTrace,
     AtomicClaim,
     EvidenceProfile,
@@ -168,11 +169,13 @@ def execute_query(
     if frame.focus_entities:
         search_fn = getattr(storage, "search_episodes_by_entities", None)
         if search_fn is not None:
+            diversity = contract.answer_space is AnswerSpace.SET
             eps = search_fn(
                 agent_id,
                 frame.focus_entities,
                 query=question,
                 top_k=caps.raw_search_top_k,
+                diversity=diversity,
             )
             seen: set[str] = set()
             window_ids: list[str] = []
@@ -196,10 +199,18 @@ def execute_query(
     # 8. Render text.
     text = _render_text(answer_items, contract)
 
-    # 8b. Collect evidence episode IDs: raw-search → operator items → claims.
-    ep_ids = _collect_evidence_episode_ids(
-        answer_items, claims, episode_search_ids=episode_search_ids, cap=caps.collect_cap
-    )
+    # 8b. Collect evidence episode IDs.
+    # When raw-search is sparse (<5 hits), joint RRF fuses claim+item signals to
+    # fill the gap. When rich, priority order (raw → items → claims) is better
+    # to avoid diluting a strong topical signal with weak claim-source noise.
+    if len(episode_search_ids) < 5:
+        ep_ids = _joint_rerank_episodes(
+            answer_items, claims, episode_search_ids, cap=caps.collect_cap
+        )
+    else:
+        ep_ids = _collect_evidence_episode_ids(
+            answer_items, claims, episode_search_ids=episode_search_ids, cap=caps.collect_cap
+        )
     evidence_text = _render_evidence_context(
         storage,
         agent_id,

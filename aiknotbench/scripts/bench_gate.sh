@@ -14,6 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$BENCH_ROOT"
 
+export AIKNOT_DEBUG_TRACE=1
+
 CONVS="${1:-0,1}"
 TOP_K="${2:-60}"
 SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "nogit")"

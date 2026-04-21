@@ -354,6 +354,7 @@ class AnswerTrace:
     raw_search_hit_ids: tuple[str, ...] = ()
     claim_hits_n: int = 0
     bundle_kinds_used: tuple[str, ...] = ()
+    distinct_session_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
