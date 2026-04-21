@@ -157,7 +157,7 @@ bench settings must have a paired entry here before it lands on the branch.
 
 ## 2026-04-21 — Move 1B leading-adverbial strip for FP patterns
 
-**Commit:** `(pending)` on `feature/configurable-mcp-env-v0.9.4`
+**Commit:** `f13370a` on `feature/configurable-mcp-env-v0.9.4`
 **Baseline:** `gate-e4488e7-2conv` — canonical (gpt-4o-mini × gpt-4o-mini), cat1 25.6 %, cat1-4 59.7 %
 **Run:** `data/runs/p1-1b-2conv/report.json` — canonical (deviations=[]), same models
 **Config deviations:** none
