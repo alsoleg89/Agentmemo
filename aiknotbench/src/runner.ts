@@ -92,7 +92,8 @@ export interface Report {
   judgeModel: string;
   answerModel: string;
   finishedAt: string;
-  summary: TypeStat;
+  summary: TypeStat;           // cat1–4 only (excludes adversarial cat5)
+  adversarial?: TypeStat;      // cat5 separate (inverse-signal)
   byType: Record<string, TypeStat>;
   categories1to4: TypeStat;
 }
@@ -104,12 +105,22 @@ export function computeReport(
   results: CheckpointResult[]
 ): Report {
   const all = results;
-  const correct = all.filter((r) => r.verdict === "CORRECT").length;
+  // Cat5 is adversarial ("Not mentioned" gold) — separate from primary summary
+  const primary = all.filter((r) => r.category !== 5);
+  const cat5 = all.filter((r) => r.category === 5);
+  const correct = primary.filter((r) => r.verdict === "CORRECT").length;
   const summary: TypeStat = {
-    total: all.length,
+    total: primary.length,
     correct,
-    accuracy: all.length > 0 ? correct / all.length : 0,
+    accuracy: primary.length > 0 ? correct / primary.length : 0,
   };
+  const adversarial: TypeStat | undefined = cat5.length > 0
+    ? {
+        total: cat5.length,
+        correct: cat5.filter((r) => r.verdict === "CORRECT").length,
+        accuracy: cat5.filter((r) => r.verdict === "CORRECT").length / cat5.length,
+      }
+    : undefined;
 
   const byType: Record<string, TypeStat> = {};
   for (const r of all) {
@@ -136,6 +147,7 @@ export function computeReport(
     answerModel,
     finishedAt: new Date().toISOString(),
     summary,
+    ...(adversarial !== undefined ? { adversarial } : {}),
     byType,
     categories1to4,
   };
@@ -166,7 +178,7 @@ export interface EvaluatorFns {
 }
 
 export interface AiknotAdapterLike {
-  ingest(turns: string[], sessions?: import("./locomo.js").Session[]): Promise<void>;
+  ingest(turns: string[], sessions?: import("./locomo.js").Session[], speakerA?: string): Promise<void>;
   recall(question: string): Promise<string>;
   close(): Promise<void>;
 }
@@ -193,6 +205,7 @@ interface LogEntry {
   context: string;
   answer: string;
   verdict: Verdict;
+  evidenceContainsGold: boolean;
   answerUsage: Usage;
   judgeUsage: Usage;
 }
@@ -332,7 +345,7 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
             }
           }
         }
-        await adapter.ingest(turns, sessions);
+        await adapter.ingest(turns, sessions, conv.speakerA);
         cp!.ingested.push(conv.idx);
         saveCheckpoint(cp!);
         process.stdout.write("done\n");
@@ -356,6 +369,9 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
         });
         saveCheckpoint(cp!);
 
+        const goldLower = qa.answer.toLowerCase();
+        const evidenceContainsGold = context.toLowerCase().includes(goldLower);
+
         appendLog(runId, {
           ts: new Date().toISOString(),
           convIdx: conv.idx,
@@ -366,6 +382,7 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
           context,
           answer,
           verdict,
+          evidenceContainsGold,
           answerUsage,
           judgeUsage,
         });
@@ -408,9 +425,9 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
   for (const [cat, stat] of Object.entries(report.byType).sort()) {
     const catNames: Record<string, string> = {
       "1": "single-hop",
-      "2": "multi-hop",
-      "3": "temporal",
-      "4": "open-ended",
+      "2": "temporal",
+      "3": "inference",
+      "4": "open-domain",
       "5": "adversarial",
     };
     const label = catNames[cat] ?? `cat${cat}`;

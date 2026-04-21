@@ -54,13 +54,13 @@ export class AiknotAdapter {
    * Dispatches to the mode-specific implementation. Exhaustive switch ensures
    * TypeScript will flag any missing case when "dated-learn" is added in v2.
    */
-  async ingest(_turns: string[], sessions?: Session[]): Promise<void> {
+  async ingest(_turns: string[], sessions?: Session[], speakerA?: string): Promise<void> {
     if (!sessions || sessions.length === 0) {
       throw new Error("ingest requires Session[] (LoCoMo sessions)");
     }
     switch (this.ingestMode) {
       case "dated":
-        await this.ingestDated(sessions);
+        await this.ingestDated(sessions, speakerA);
         return;
       default: {
         const _exhaustive: never = this.ingestMode;
@@ -79,7 +79,7 @@ export class AiknotAdapter {
    *
    * In v2 this method is followed by an LLM enrichment pass ("dated-learn").
    */
-  private async ingestDated(sessions: Session[]): Promise<void> {
+  private async ingestDated(sessions: Session[], speakerA?: string): Promise<void> {
     for (const session of sessions) {
       const sessionId = session.date
         ? `session-${session.date}`
@@ -95,8 +95,13 @@ export class AiknotAdapter {
         const turnText = session.turns[i] ?? "";
         if (!turnText.trim()) continue;
 
-        // LoCoMo alternates: even index = person1 (user), odd = person2 (assistant)
-        const speaker = i % 2 === 0 ? "user" : "assistant";
+        // Derive speaker from the "Name: text" prefix embedded by locomo.ts normalizer.
+        // Falls back to index parity only when prefix is absent.
+        const prefixMatch = turnText.match(/^([^:]+):/);
+        const prefixName = prefixMatch?.[1];
+        const speaker = speakerA && prefixName
+          ? (prefixName === speakerA ? "user" : "assistant")
+          : (i % 2 === 0 ? "user" : "assistant");
 
         await this.kb.ingestEpisode({
           sessionId,

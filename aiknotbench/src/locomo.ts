@@ -37,6 +37,7 @@ export interface Conversation {
   turns: string[];    // flat (backward compat)
   sessions: Session[];
   qa: QAPair[];
+  speakerA?: string;  // primary speaker (user) for correct attribution
 }
 
 export interface LoadOptions {
@@ -177,7 +178,8 @@ export function normalizeConversation(raw: RawConversation, idx: number): Conver
     })
     .filter((q): q is QAPair => q !== null);
 
-  return { idx, turns: allTurns, sessions, qa };
+  const speakerA = typeof conv["speaker_a"] === "string" ? conv["speaker_a"] : undefined;
+  return { idx, turns: allTurns, sessions, qa, speakerA };
 }
 
 // ---- Filtering helpers (used by runner) ------------------------------------

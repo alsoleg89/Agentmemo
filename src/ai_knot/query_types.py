@@ -348,6 +348,12 @@ class AnswerTrace:
     strategy: str  # operator name chosen
     decision_notes: tuple[str, ...]
     latency_ms: float
+    # Optional fields populated when AIKNOT_DEBUG_TRACE=1
+    n_episode_windows: int = 0
+    evidence_chars: int = 0
+    raw_search_hit_ids: tuple[str, ...] = ()
+    claim_hits_n: int = 0
+    bundle_kinds_used: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -399,6 +405,11 @@ class AnswerTrace:
             "strategy": self.strategy,
             "decision_notes": list(self.decision_notes),
             "latency_ms": self.latency_ms,
+            "n_episode_windows": self.n_episode_windows,
+            "evidence_chars": self.evidence_chars,
+            "raw_search_hit_ids": list(self.raw_search_hit_ids),
+            "claim_hits_n": self.claim_hits_n,
+            "bundle_kinds_used": list(self.bundle_kinds_used),
         }
 
 

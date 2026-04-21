@@ -10,6 +10,7 @@ Enforced by: scripts/check_query_runtime_isolation.py
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -147,6 +148,7 @@ def execute_query(
 
     # 9. Build trace.
     latency_ms = (time.monotonic() - t0) * 1000.0
+    _debug = os.environ.get("AIKNOT_DEBUG_TRACE") == "1"
     trace = AnswerTrace(
         question=question,
         frame=frame,
@@ -157,6 +159,11 @@ def execute_query(
         strategy=strategy,
         decision_notes=tuple(decision_notes),
         latency_ms=latency_ms,
+        n_episode_windows=len(ep_ids) if _debug else 0,
+        evidence_chars=len(evidence_text) if _debug else 0,
+        raw_search_hit_ids=tuple(episode_search_ids) if _debug else (),
+        claim_hits_n=len(claims) if _debug else 0,
+        bundle_kinds_used=tuple(dict.fromkeys(b.kind for b in bundles)) if _debug else (),
     )
 
     return QueryAnswer(
