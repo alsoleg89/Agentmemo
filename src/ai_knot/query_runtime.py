@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 import ai_knot.support_retrieval as _sr
+from ai_knot._bm25 import _rrf_fuse
 from ai_knot.query_contract import analyze_query, derive_answer_contract
 from ai_knot.query_operators import OPERATORS, choose_strategy
 from ai_knot.query_types import (
@@ -38,26 +39,38 @@ from ai_knot.query_types import (
 
 @dataclass(frozen=True)
 class _CapSet:
-    raw_search_top_k: int      # top_k for search_episodes_by_entities
-    window_dedup_cap: int      # max unique episode IDs from window expansion
-    collect_cap: int           # cap for _collect_evidence_episode_ids
-    render_top_k: int          # max episodes rendered to evidence_text
-    char_budget: int           # max bytes in evidence_text
-    per_turn_max: int          # max chars per individual turn in evidence
+    raw_search_top_k: int  # top_k for search_episodes_by_entities
+    window_dedup_cap: int  # max unique episode IDs from window expansion
+    collect_cap: int  # cap for _collect_evidence_episode_ids
+    render_top_k: int  # max episodes rendered to evidence_text
+    char_budget: int  # max bytes in evidence_text
+    per_turn_max: int  # max chars per individual turn in evidence
 
 
 _PROFILE_CAPS: dict[str, _CapSet] = {
     "narrow": _CapSet(
-        raw_search_top_k=5, window_dedup_cap=8, collect_cap=5,
-        render_top_k=5, char_budget=8_000, per_turn_max=400,
+        raw_search_top_k=5,
+        window_dedup_cap=8,
+        collect_cap=5,
+        render_top_k=5,
+        char_budget=8_000,
+        per_turn_max=400,
     ),
     "balanced": _CapSet(
-        raw_search_top_k=20, window_dedup_cap=24, collect_cap=15,
-        render_top_k=12, char_budget=22_000, per_turn_max=1200,
+        raw_search_top_k=20,
+        window_dedup_cap=24,
+        collect_cap=15,
+        render_top_k=12,
+        char_budget=22_000,
+        per_turn_max=1200,
     ),
     "wide": _CapSet(
-        raw_search_top_k=40, window_dedup_cap=48, collect_cap=25,
-        render_top_k=20, char_budget=36_000, per_turn_max=2000,
+        raw_search_top_k=40,
+        window_dedup_cap=48,
+        collect_cap=25,
+        render_top_k=20,
+        char_budget=36_000,
+        per_turn_max=2000,
     ),
 }
 
@@ -154,7 +167,9 @@ def execute_query(
         search_fn = getattr(storage, "search_episodes_by_entities", None)
         if search_fn is not None:
             eps = search_fn(
-                agent_id, frame.focus_entities, query=question,
+                agent_id,
+                frame.focus_entities,
+                query=question,
                 top_k=caps.raw_search_top_k,
             )
             seen: set[str] = set()
@@ -179,12 +194,26 @@ def execute_query(
     # 8. Render text.
     text = _render_text(answer_items, contract)
 
-    # 8b. Build evidence_text for downstream LLM context.
-    ep_ids = _collect_evidence_episode_ids(
-        answer_items, claims, episode_search_ids, cap=caps.collect_cap
+    # 8b. Build evidence_text — joint RRF fusion of episode and claim signals.
+    ep_ids = _joint_rerank_episodes(
+        answer_items,
+        claims,
+        episode_search_ids,
+        cap=caps.collect_cap,
+        operator_head=(
+            # For deterministic single-value operators, surface the best-matching
+            # episode first so the answer-model sees the strongest evidence up top.
+            answer_items[0].source_episode_ids[0]
+            if strategy in ("exact_state", "time_resolve")
+            and len(answer_items) == 1
+            and answer_items[0].source_episode_ids
+            else None
+        ),
     )
     evidence_text = _render_evidence_context(
-        storage, agent_id, ep_ids,
+        storage,
+        agent_id,
+        ep_ids,
         top_k=caps.render_top_k,
         char_budget=caps.char_budget,
         per_turn_max=caps.per_turn_max,
@@ -320,43 +349,53 @@ def _render_text(items: list[AnswerItem], contract: AnswerContract) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _collect_evidence_episode_ids(
+def _joint_rerank_episodes(
     items: list[AnswerItem],
     claims: list[AtomicClaim],
-    episode_search_ids: list[str] | None = None,
-    cap: int = 5,
+    episode_search_ids: list[str] | None,
+    cap: int = 15,
+    operator_head: str | None = None,
 ) -> list[str]:
-    """Unique episode ids in retrieval order: raw-search → items → claims.
+    """Joint RRF fusion of episode-search and claim-source signals.
 
-    Raw-search runs on entity + query text so it finds the most topically
-    relevant episodes.  Operator items and claim sources are appended as
-    secondary and tertiary sources to fill up to cap.
+    Three ranked lists fused via RRF (Cormack 2009):
+      1. Raw-episode search (entity+query BM25 — strongest topical signal, weight 2.0)
+      2. Episodes from operator-selected answer items (weight 1.5)
+      3. Episodes from all retrieved claims, ordered by claim sequence (weight 1.0)
+
+    If operator_head is set (for exact_state/time_resolve single-answer operators),
+    it is prepended unconditionally so the answer-model sees the strongest evidence
+    first regardless of RRF rank.
     """
-    seen: set[str] = set()
-    out: list[str] = []
+    raw_list = episode_search_ids or []
 
-    def _add(eid: str | None) -> bool:
-        if eid and eid not in seen:
-            seen.add(eid)
-            out.append(eid)
-            return len(out) >= cap
-        return False
-
-    # 1. Raw-search results first — entity+query search finds topically relevant episodes.
-    if episode_search_ids:
-        for eid in episode_search_ids:
-            if _add(eid):
-                return out
-    # 2. Episodes from selected answer items.
+    item_list: list[str] = []
+    seen_item: set[str] = set()
     for it in items:
         for eid in it.source_episode_ids:
-            if _add(eid):
-                return out
-    # 3. Episodes from all retrieved claims.
+            if eid and eid not in seen_item:
+                seen_item.add(eid)
+                item_list.append(eid)
+
+    claim_list: list[str] = []
+    seen_claim: set[str] = set()
     for c in claims:
-        if _add(c.source_episode_id):
-            return out
-    return out
+        eid = c.source_episode_id
+        if eid and eid not in seen_claim:
+            seen_claim.add(eid)
+            claim_list.append(eid)
+
+    fused = _rrf_fuse([raw_list, item_list, claim_list], weights=[2.0, 1.5, 1.0])
+    ranked = sorted(fused, key=lambda x: fused[x], reverse=True)[:cap]
+
+    if operator_head:
+        if operator_head in ranked:
+            ranked.remove(operator_head)
+        ranked.insert(0, operator_head)
+        if len(ranked) > cap:
+            ranked = ranked[:cap]
+
+    return ranked
 
 
 def _render_evidence_context(

@@ -5,15 +5,14 @@ Verifies that:
 2. char_budget is enforced and evidence_text doesn't overflow.
 3. Default profile (balanced) is applied when env var is not set.
 """
+
 from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-import pytest
-
-from ai_knot.query_runtime import _PROFILE_CAPS, _CapSet, _get_caps, _render_evidence_context
+from ai_knot.query_runtime import _PROFILE_CAPS, _get_caps, _render_evidence_context
 from ai_knot.query_types import RawEpisode
 from ai_knot.storage.sqlite_storage import SQLiteStorage
 
@@ -84,7 +83,8 @@ class TestRenderEvidenceContext:
         storage.save_episodes("a", episodes)
 
         result = _render_evidence_context(
-            storage, "a",
+            storage,
+            "a",
             [f"ep{i}" for i in range(20)],
             top_k=20,
             char_budget=2_000,
@@ -116,13 +116,17 @@ class TestRenderEvidenceContext:
         balanced = _PROFILE_CAPS["balanced"]
 
         narrow_result = _render_evidence_context(
-            storage, "a", ep_ids,
+            storage,
+            "a",
+            ep_ids,
             top_k=narrow.render_top_k,
             char_budget=narrow.char_budget,
             per_turn_max=narrow.per_turn_max,
         )
         balanced_result = _render_evidence_context(
-            storage, "a", ep_ids,
+            storage,
+            "a",
+            ep_ids,
             top_k=balanced.render_top_k,
             char_budget=balanced.char_budget,
             per_turn_max=balanced.per_turn_max,
