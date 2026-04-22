@@ -193,6 +193,26 @@ bench settings must have a paired entry here before it lands on the branch.
 
 ---
 
+## 2026-04-22 — Move 2P POSSESSIVE-family kinship extractor (REVERTED)
+
+**Commit:** not committed — reverted before merge on `feature/configurable-mcp-env-v0.9.4`
+**Baseline:** `p1-1b-2conv` — canonical (gpt-4o-mini × gpt-4o-mini), cat1 30.2 %, cat1-4 62.7 %
+**Run:** `data/runs/p1-2p-family-2conv/report.json` (run dir deleted post-revert), canonical (deviations=[]), same models
+**Config deviations:** none
+**Decision:** REVERT — no gains on target cat1, cat3 dropped near stop-threshold, cat1-4 aggregate below baseline
+**Reason:** Added `_FAMILY_TERMS` dict (40 kinship lemmas → 8 canonical classes: spouse/parent/child/sibling/grandparent/grandchild/pibling/nibling) + `_POSSESSIVE_FAMILY_RE` + emission block in `materialize_episode` that fires for `^My <kinship>(?:'s name)? (?:is|was|are|were)? (?:named|called)? <ProperName>` when speaker is known and not a pronoun subject. Emitted `RELATION` claim `<speaker> has_<class> <Name>`, slot_key `"{speaker}::has_{class}"`. Bumped `MATERIALIZATION_VERSION` 6 → 7 to trigger rebuild. 15 regression tests added in `tests/test_materialization_deterministic.py` (spouse/husband/son/daughter/mom/brother/grandma/aunt/ex-wife/apostrophe-s/two-word-name/no-name-sentinel/non-family-rejection/no-speaker-skip/dict-completeness). Justified as generic: closed semantic class (schema.org Person), universal in natural speech, not benchmark-derived.
+**2P numbers (canonical gpt-4o-mini × gpt-4o-mini):**
+  - cat1: 25.6 % (−4.6 pp ⚠ target erased to pre-1B baseline)
+  - cat2: 50.8 % (±0)
+  - cat3: 61.5 % (−7.7 pp, within floor 61.0 % but ~0.5 pp from stop-threshold −8.2 pp)
+  - cat4: 80.7 % (±0, well above floor 72.5 %)
+  - cat5: 25.4 % (−1.4 pp, within floor 20 %)
+  - cat1-4 aggregate: 61.4 % (−1.3 pp, technically within ±2 pp gate but below baseline with zero target gain)
+**Rationale for REVERT despite being within numeric stop-rule:** rule is necessary-not-sufficient. New feature with net-negative delta and no target gain is a regression regardless of magnitude. cat1 loss erases 1B gain; cat3 approaches stop-threshold (−7.7 vs −8.2 pp floor). Suspected cause: `has_<class>` RELATION claims crowd out primary cat1-evidence in `render_top_k` for SET/single-hop Q that don't involve kinship, diluting retrieval precision. Kinship coverage would only help a narrow Q subset while adding noise to the majority.
+**Next baseline update:** no — `p1-1b-2conv` remains baseline. No follow-up 2P-variant planned (revert closes this branch of the generic-extractor experiment).
+
+---
+
 ## Known bad artifacts
 
 ### `data/runs/ddsa-off/`
