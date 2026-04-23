@@ -277,6 +277,47 @@ bench settings must have a paired entry here before it lands on the branch.
 
 ---
 
+## 2026-04-23 — Move 2S1 SSP instrumentation / mention graph (REVERTED, not committed)
+
+**Commit:** none — change applied in working tree only, reverted before commit on `feature/configurable-mcp-env-v0.9.4`
+**Baseline:** `p1-1b-2conv` — canonical, cat1 30.2 %, cat2 50.8 %, cat3 69.2 %, cat4 76.3 %, cat5 28.2 %, cat1-4 62.7 %
+**Run:** `data/runs/p-2s1-2conv/report.json`, canonical (deviations=[]), same models
+**Config deviations:** none
+**Decision:** REVERT — cat1-4 aggregate dropped −3.0 pp (exceeds 2 pp stop-rule). Attributed to LLM stochasticity, not real regression (see rationale)
+**Reason:** Plan Phase 2 stage 2S1 — first architectural prep for Synaptic Subject Projection. Hypothesis: build a mention-context graph (MCG) per (agent_id, session_id), project non-named-subject claims onto candidate entity hypotheses with edge weights (same-sentence-named 1.00, speaker 0.70, adjacent-turn 0.55, session-wide 0.25, MIN 0.40), attach as `qualifiers["ssp_hypotheses"]` on each claim as instrumentation-only scaffolding. Scaffolding should be retrieval-neutral (no operator / renderer / index reads the new qualifier) and enable 2S2/2S3 shadow-claim emission later. Change: new `src/ai_knot/mention_graph.py` (~205 LOC: `MentionGraph` dataclass, `project_for_turn`, `attach_subject_hypotheses_to_claims` post-pass) + single post-pass call in `rebuild_claims_from_raw` + 15 unit tests in `tests/test_mention_graph.py`. Verified code-path neutrality: `grep "qualifiers\." src/ai_knot/query_runtime.py src/ai_knot/query_operators.py src/ai_knot/support_bundles.py` returned only `date_token`, `time_anchor`, `relative_time` — `ssp_hypotheses` is never consumed downstream.
+**p-2s1-2conv numbers (canonical gpt-4o-mini × gpt-4o-mini, 2-conv):**
+  - cat1: 23.3 % (10/43; −7.0 pp, 43-Q sample lost 3 Q)
+  - cat2: 49.2 % (31/63; −1.6 pp, lost 1 Q)
+  - cat3: 69.2 % (9/13; unchanged)
+  - cat4: 78.1 % (89/114; +1.8 pp, gained 2 Q)
+  - cat5: 23.9 % (17/71; −4.3 pp, lost 3 Q)
+  - cat1-4 aggregate: 59.7 % (139/233; −3.0 pp, trips 2 pp stop-rule)
+**Rationale for REVERT:** Aggregate −3.0 pp exceeds the 2 pp stop-rule by itself, so revert is mandatory. But *why* a retrieval-neutral change moved the bench is the important finding. The new qualifier is never read anywhere in retrieval, rendering, or indexing. The episode→claim set is identical module the opaque qualifier string. Identical render buses reach the LLM. The delta is gpt-4o-mini stochasticity on small per-category samples: n=43 cat1, n=13 cat3, n=71 cat5 — at temp=0 the sampler still differs across runs when any upstream float (score, tie-break, iteration order) varies, and ±3 Q per category is within the observed 2-conv noise band. cat3 unchanged supports this (cat3 is the most noise-sensitive with n=13, and it would move first under a real retrieval shift). **New operational lesson:** the 2-conv gate cannot discriminate instrumentation-level moves from LLM noise — the plan's "cat1 ±0.5 pp" gate for 2S1 was unrealistic at this sample size. Any future code-neutral scaffolding (including 2S2 dry-run, 2S3 shadow emission, 2S4 folded storage) must be validated on either full-10 (n=233) or repeated-2-conv (≥3 runs averaged) or a targeted micro-bench on the Q family the instrumentation enables. Chaining more 2-conv gate moves on this baseline will just produce more reverts. Documented in `memory/project_locomo_phase1_retrieval_exhausted.md` as the 6th consecutive revert on cat1-targeting work.
+**Next baseline update:** no — `p1-1b-2conv` remains baseline. Working tree restored: `mention_graph.py` and `tests/test_mention_graph.py` deleted; `rebuild_claims_from_raw` post-pass call removed; materialization tests (54 passed, 1 skipped) confirm clean state.
+
+---
+
+## 2026-04-23 — Move 6A speaker-prefix BM25 boost (REVERTED, not-a-cat1-fix)
+
+**Commit:** `ca29ad8` (reverted by `d1ea055`) on `feature/configurable-mcp-env-v0.9.4`
+**Baseline:** `p1-1b-2conv` — canonical, cat1 30.2 %, cat2 50.8 %, cat3 69.2 %, cat4 **80.7 %**, cat5 **26.8 %**, cat1-4 **62.66 %**. (Note: prior DECISIONS entries referenced cat4=76.3% / cat5=28.2% / cat1-4=59.7% — those were the `gate-e4488e7-2conv` pre-1B baseline; this entry uses the real post-1B baseline from `p1-1b-2conv/report.json`.)
+**Runs:** `data/runs/m6a-run1-2conv`, `m6a-run2-2conv`, `m6a-run3-2conv`/report.json — 3× canonical (gpt-4o-mini × gpt-4o-mini)
+**Config deviations:** none
+**Decision:** REVERT — not a cat1 fix; avg cat1 −2.33 pp while cat1 is the sole goal. Aggregate stayed inside 2 pp stop-rule (−0.43 pp) and per-category floors held, so formal stop-rule did not trigger — but accepting this move would hide the actual cat1 bottleneck.
+**Reason:** Diagnosis from `memory/project_locomo_phase1_retrieval_exhausted.md`: (A) pool composition — `raw_text LIKE '%<name>%'` returns ~280 candidates per major entity in 2-conv; BM25+embedding RRF cannot separate fact-bearing speaker-turns from counterparty mentions. New observation this session: `raw_episodes.speaker` column stores *role* (`user`/`assistant`), **not** name; but 100 % of LOCOMO turns prefix `raw_text` with `<Name>: …` — single source of truth for who is actually speaking. Change: added `_speaker_prefix_boost(raw_text, entities) → float` returning `AI_KNOT_SPEAKER_PREFIX_BOOST` (default 1.5) when `raw_text.startswith(f"{entity}:")` for any focus entity; no down-demotion; applied to `max(bm25(center), bm25(window))` in the ranking sort key of `search_episodes_by_entities`. 1 src file + 1 new test file (10 regression tests), 237 LOC total (mostly test scaffolding). Pre-flight BM25-only simulation on `p1-1b-2conv/knot.db` for the target Q "Which cities has Jon visited?" showed Rome-trip moves from rank 187 → 135 — still far outside top-60 — confirming ahead of bench that speaker-boost would NOT address semantic-gap cat1 misses like Rome-trip (BM25 has zero overlap with Q token "visited" / "cities"; gold turn only contains "trip" / "Rome"). Bench was still run to measure effect on Q-families the boost *could* help.
+**m6a 3-run averaged (canonical gpt-4o-mini × gpt-4o-mini, 2-conv):**
+  - cat1: 27.91 % avg (12, 11, 13 / 43; **−2.33 pp**)
+  - cat2: 55.03 % avg (34, 35, 35 / 63; **+4.23 pp** — real cross-noise gain)
+  - cat3: 66.67 % avg (9, 9, 8 / 13; −2.56 pp — single-run dip in r3, noise-floor territory at n=13)
+  - cat4: 78.65 % avg (90, 89, 90 / 114; −2.05 pp — consistent drop across 3 runs)
+  - cat5: 24.88 % avg (18, 18, 17 / 71; −1.88 pp — above 20 % floor)
+  - cat1-4 agg: 62.23 % avg (145, 144, 146 / 233; **−0.43 pp** — within noise)
+**Rationale for REVERT:** Asymmetric trade-off. Speaker-boost helps cat2 (multi-hop benefits from anchoring claims to speakers) but hurts cat1 (single-hop recall often needs counterparty-turn evidence like "Caroline mentioned Melanie's pottery") and cat4 (adversarial Q become over-confident when counterparty signal is suppressed). The only category where boost helps is cat2, which is not the plan goal. Cat1, the sole target, regressed by −1 Q average — inside the 2-conv noise band, but consistent (never gained in any of 3 runs). Accepting this move as a cat2+cat4-split-trade would add complexity without moving the cat1 target and would pollute the baseline for the next real cat1 work (materializer rewrite, Phase B). Keeping `p1-1b-2conv` clean preserves diagnostic clarity. Pattern from `memory/project_locomo_phase1_retrieval_exhausted.md` holds: ranking-level moves (even architectural ones like prefix-aware pool weighting) don't address bottleneck B (23 % raw→claim materialization rate). Next cat1 move must attack materializer coverage directly.
+**Next baseline update:** no — `p1-1b-2conv` remains baseline.
+**Implementation note for future:** the `_speaker_prefix_boost` helper itself is a clean utility (correct on Jonathan!=Jon edge case, case-sensitive, env-overridable). If a future move wants speaker-awareness without the cat1/cat4 trade-off, the hook is easy to restore and apply selectively (e.g. only for SET-answer Q via `AnswerSpace.SET` gate, or only for multi-hop frames). Not pursuing that now because cat1 remains the primary blocker.
+
+---
+
 ## Known bad artifacts
 
 ### `data/runs/ddsa-off/`
