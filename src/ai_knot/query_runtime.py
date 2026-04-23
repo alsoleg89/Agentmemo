@@ -58,13 +58,15 @@ _PROFILE_CAPS: dict[str, _CapSet] = {
         per_turn_max=400,
     ),
     "balanced": _CapSet(
-        raw_search_top_k=20,
-        window_dedup_cap=24,
-        collect_cap=15,
-        render_top_k=12,
-        # justification: long-form conversational evidence; at ~1200 chars/turn
-        # a 15-turn retrieval window needs ~18K chars — 22K gives safe margin.
-        char_budget=22_000,
+        raw_search_top_k=28,
+        window_dedup_cap=32,
+        collect_cap=22,
+        render_top_k=18,
+        # justification: long-form conversational evidence at ~1200 chars/turn.
+        # An 18-turn render window needs ~21 600 chars; 30 000 gives safe
+        # margin for turns that occasionally exceed the per_turn_max soft cap
+        # via context concatenation in _render_evidence_context.
+        char_budget=30_000,
         per_turn_max=1200,
     ),
     "wide": _CapSet(
