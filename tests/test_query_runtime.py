@@ -445,11 +445,7 @@ def test_expand_centers_first_respects_cap_and_dedups():
 
 
 def test_set_caps_widened_vs_scalar():
-    """_caps_for_contract is monotone for SET, identity for scalar.
-
-    Balanced matches the SET floor after Move 5, so SET widening is a no-op
-    there. The strict widening still holds against tighter profiles (narrow).
-    """
+    """_caps_for_contract widens funnel for SET, leaves scalar unchanged."""
     from ai_knot.query_runtime import _PROFILE_CAPS, _caps_for_contract
     from ai_knot.query_types import (
         AnswerContract,
@@ -479,14 +475,7 @@ def test_set_caps_widened_vs_scalar():
     assert _caps_for_contract(base, scalar) is base, "Scalar contract must return base unchanged"
 
     widened = _caps_for_contract(base, set_ctx)
-    assert widened.render_top_k >= base.render_top_k, "SET widening is monotone"
-    assert widened.char_budget >= base.char_budget
-    assert widened.collect_cap >= base.collect_cap
+    assert widened.render_top_k > base.render_top_k, "SET must widen render_top_k"
+    assert widened.char_budget > base.char_budget, "SET must widen char_budget"
+    assert widened.collect_cap > base.collect_cap, "SET must widen collect_cap"
     assert widened.per_turn_max == base.per_turn_max, "per_turn_max must be unchanged"
-
-    # Strict widening still holds against the narrow profile.
-    narrow = _PROFILE_CAPS["narrow"]
-    widened_narrow = _caps_for_contract(narrow, set_ctx)
-    assert widened_narrow.render_top_k > narrow.render_top_k
-    assert widened_narrow.char_budget > narrow.char_budget
-    assert widened_narrow.collect_cap > narrow.collect_cap
