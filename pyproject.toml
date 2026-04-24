@@ -46,6 +46,8 @@ dev = [
 [project.scripts]
 ai-knot = "ai_knot.cli:main"
 ai-knot-mcp = "ai_knot.mcp_server:main"
+ai-knot-v2 = "ai_knot_v2.api.cli:main"
+ai-knot-v2-mcp = "ai_knot_v2.api.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/alsoleg89/ai-knot"
