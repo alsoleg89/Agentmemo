@@ -100,7 +100,7 @@ module = ["httpx", "httpx.*", "click", "click.*", "yaml", "psycopg", "psycopg.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["ai_knot.cli", "ai_knot.mcp_server"]
+module = ["ai_knot.cli", "ai_knot.mcp_server", "ai_knot_v2.api.mcp_server"]
 disallow_untyped_decorators = false
 
 [tool.coverage.run]
