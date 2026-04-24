@@ -4,8 +4,6 @@ These tests will pass once core/atom.py, core/types.py, core/episode.py,
 core/evidence.py, core/dependency.py, and core/library.py are implemented.
 """
 
-import pytest
-
 
 def test_memory_atom_import() -> None:
     """MemoryAtom must be importable from core.atom."""
@@ -32,7 +30,6 @@ def test_atom_library_import() -> None:
     from ai_knot_v2.core.library import AtomLibrary  # noqa: F401
 
 
-@pytest.mark.xfail(reason="Sprint 1 not implemented yet", strict=True)
 def test_memory_atom_construction() -> None:
     """MemoryAtom can be constructed with all required fields."""
     from ai_knot_v2.core.atom import MemoryAtom

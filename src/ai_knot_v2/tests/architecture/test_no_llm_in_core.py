@@ -18,7 +18,7 @@ CORE_DIRS = ["core", "ops", "store", "api"]
 # Provider names whose presence in an import statement is forbidden.
 FORBIDDEN_NAMES = ["openai", "anthropic", "gpt", "claude", "litellm", "langchain"]
 
-V2_ROOT = Path(__file__).parents[3]  # src/ai_knot_v2/
+V2_ROOT = Path(__file__).parents[2]  # src/ai_knot_v2/
 
 
 def _python_files_under(directory: Path) -> list[Path]:
