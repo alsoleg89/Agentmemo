@@ -1,7 +1,7 @@
-"""READ operation: query → intervention → candidates → dependency-closure → RecallResult.
+"""READ operation: query → intervention → candidates → planner → RecallResult.
 
 Pipeline: extract_intervention → select_candidates (submodular-greedy) →
-          dependency_closure → build RecallResult.
+          plan_evidence_pack (planner) → build RecallResult.
 
 No LLM. All selection is deterministic rule-based.
 """
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 
-from ai_knot_v2.core._ulid import new_ulid
 from ai_knot_v2.core.action_calculus import (
     action_distance,
     canonical_action_signature,
@@ -21,7 +20,6 @@ from ai_knot_v2.core.action_taxonomy import ActionClass
 from ai_knot_v2.core.atom import MemoryAtom
 from ai_knot_v2.core.library import AtomLibrary
 from ai_knot_v2.core.types import (
-    EvidencePack,
     Intervention,
     ReaderBudget,
     RecallResult,
@@ -170,35 +168,6 @@ def select_candidates(
 
 
 # ---------------------------------------------------------------------------
-# Dependency closure
-# ---------------------------------------------------------------------------
-
-
-def _apply_dependency_closure(
-    atoms: list[MemoryAtom],
-    library: AtomLibrary,
-    budget: ReaderBudget,
-) -> list[MemoryAtom]:
-    """Expand atom list with transitive dependencies up to max_atoms."""
-    if not budget.require_dependency_closure:
-        return atoms
-
-    atom_ids = {a.atom_id for a in atoms}
-    result = list(atoms)
-
-    for atom in list(atoms):
-        for dep_id in atom.depends_on:
-            if dep_id in atom_ids:
-                continue
-            dep = library.get(dep_id)
-            if dep is not None and len(result) < budget.max_atoms:
-                result.append(dep)
-                atom_ids.add(dep_id)
-
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Main recall function
 # ---------------------------------------------------------------------------
 
@@ -208,23 +177,24 @@ def recall(
     library: AtomLibrary,
     budget: ReaderBudget | None = None,
 ) -> RecallResult:
-    """Full read path: query → intervention → select → dependency-closure → RecallResult."""
+    """Full read path: query → intervention → select → planner → RecallResult."""
+    from ai_knot_v2.ops.planner import plan_evidence_pack
+
     if budget is None:
         budget = DEFAULT_BUDGET
 
     intervention, _action = extract_intervention(query)
     candidates = select_candidates(library, intervention, query, budget)
-    with_deps = _apply_dependency_closure(candidates, library, budget)
 
-    # Build skeleton evidence pack
-    pack = EvidencePack(
-        pack_id=new_ulid(),
-        atoms=tuple(a.atom_id for a in with_deps),
-        spans=(),
-    )
+    # Evidence planner: greedy-utility selection with contradiction resolution
+    pack = plan_evidence_pack(candidates, query, budget, library)
+
+    # Resolve atom objects from pack (after planner may have filtered some)
+    pack_atom_ids = set(pack.atoms)
+    result_atoms = [a for a in candidates if a.atom_id in pack_atom_ids]
 
     return RecallResult(
-        atoms=with_deps,
+        atoms=result_atoms,
         evidence_pack_id=pack.pack_id,
         intervention=intervention,
     )
