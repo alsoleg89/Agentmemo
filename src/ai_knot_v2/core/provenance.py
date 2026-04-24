@@ -9,7 +9,7 @@ from typing import Any, Literal
 @dataclasses.dataclass(frozen=True, slots=True)
 class AuditEvent:
     event_id: str
-    operation: Literal["write", "forget", "consolidate", "read"]
+    operation: Literal["write", "forget", "consolidate", "read", "holonomy_detected"]
     atom_id: str | None
     agent_id: str
     timestamp: int

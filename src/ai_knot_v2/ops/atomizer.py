@@ -369,12 +369,23 @@ def _canonical_predicate(predicate_raw: str, pattern_name: str | None = None) ->
 
 _FIRST_PERSON = re.compile(r"^(i|me|my|mine|myself)$", re.I)
 
+# Third-person pronouns that can be resolved via within-session coreference
+_THIRD_SG = re.compile(r"^(she|he|her|him|his|hers)$", re.I)
+_THIRD_PL = re.compile(r"^(they|them|their|theirs)$", re.I)
+
 
 class Atomizer:
-    """Converts RawEpisode objects into MemoryAtom lists."""
+    """Converts RawEpisode objects into MemoryAtom lists.
+
+    Maintains within-session coreference state: after a named entity appears
+    as subject, subsequent third-person pronouns in the same session resolve
+    to that entity's orbit (Sprint 12 holonomy + coreference activation).
+    """
 
     def __init__(self, groupoid: EntityGroupoid | None = None) -> None:
         self._groupoid = groupoid or EntityGroupoid()
+        # Within-session coreference anchor: (session_id, orbit_id, display_name)
+        self._coref: tuple[str, str, str] | None = None
 
     def atomize(
         self,
@@ -403,9 +414,24 @@ class Atomizer:
             if _FIRST_PERSON.match(subj_raw):
                 entity_orbit_id = speaker_orbit
                 subject: str = speaker_name
+            elif (_THIRD_SG.match(subj_raw) or _THIRD_PL.match(subj_raw)) and (
+                self._coref is not None and self._coref[0] == episode.session_id
+            ):
+                # Within-session coreference: resolve pronoun to last named entity
+                _, entity_orbit_id, coref_name = self._coref
+                subject = coref_name  # use resolved name for display
             else:
                 subject = subj_raw
                 entity_orbit_id = self._groupoid.resolve(subj_raw)
+                # Update coreference: named entity (capitalized, non-pronoun)
+                if (
+                    subj_raw
+                    and subj_raw[0].isupper()
+                    and not _FIRST_PERSON.match(subj_raw)
+                    and not _THIRD_SG.match(subj_raw)
+                    and not _THIRD_PL.match(subj_raw)
+                ):
+                    self._coref = (episode.session_id, entity_orbit_id, subject)
 
             # Temporal resolution
             source_text = clause.temporal_expr or episode.text

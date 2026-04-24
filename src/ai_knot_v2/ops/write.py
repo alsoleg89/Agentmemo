@@ -98,6 +98,22 @@ def write_episodes(
                 )
             )
 
+    # Holonomy check (Sprint 12): flag if entity merge graph has a closed loop.
+    # Holonomy indicates contradictory identity resolution in the groupoid.
+    if atomizer._groupoid.has_holonomy():  # noqa: SLF001
+        cycle_orbits = atomizer._groupoid.holonomy_orbits()  # noqa: SLF001
+        now = int(time.time())
+        store.append_audit_event(
+            AuditEvent(
+                event_id=new_ulid(),
+                operation="holonomy_detected",
+                atom_id="",
+                agent_id=episodes[0].agent_id if episodes else "",
+                timestamp=now,
+                details={"cycle_orbits": cycle_orbits},
+            )
+        )
+
     return WriteResult(
         episode_ids=tuple(ep.episode_id for ep in episodes),
         atom_ids=tuple(all_atom_ids),

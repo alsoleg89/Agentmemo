@@ -211,3 +211,82 @@ class TestTemporalResolution:
         assert vf is None
         assert vu is None
         assert gran == "instant"
+
+
+class TestCoreferenceResolution:
+    """Sprint 12: within-session pronoun coreference and holonomy detection."""
+
+    def _ep(self, text: str, session_id: str = "sess-1", user_id: str = "user-1") -> RawEpisode:
+        return RawEpisode(
+            episode_id=new_ulid(),
+            agent_id="agent-1",
+            user_id=user_id,
+            session_id=session_id,
+            turn_index=0,
+            speaker="user",  # type: ignore[arg-type]
+            text=text,
+            timestamp=1_700_000_000,
+        )
+
+    def test_pronoun_resolves_to_last_named_entity(self) -> None:
+        """'She' after 'Alice' in same session → atom under Alice's orbit."""
+        atomizer = Atomizer()
+        ep1 = self._ep("Alice is a teacher.", session_id="sess-1")
+        ep2 = self._ep("She loves hiking.", session_id="sess-1")
+        atomizer.atomize(ep1, SESSION_DATE)
+        atoms2 = atomizer.atomize(ep2, SESSION_DATE)
+        # She's atoms should be under Alice's entity orbit, not entity:she
+        orbit_ids = {a.entity_orbit_id for a in atoms2}
+        assert "entity:alice" in orbit_ids
+
+    def test_pronoun_not_resolved_across_sessions(self) -> None:
+        """'She' in session-2 after named entity in session-1 → NOT resolved (session boundary)."""
+        atomizer = Atomizer()
+        ep1 = self._ep("Alice is a teacher.", session_id="sess-1")
+        ep2 = self._ep("She loves hiking.", session_id="sess-2")
+        atomizer.atomize(ep1, SESSION_DATE)
+        atoms2 = atomizer.atomize(ep2, SESSION_DATE)
+        # Cross-session: she stays unresolved
+        orbit_ids = {a.entity_orbit_id for a in atoms2}
+        assert "entity:alice" not in orbit_ids
+
+    def test_pronoun_resolves_to_most_recent_entity(self) -> None:
+        """After Bob, 'he' resolves to Bob (not Alice from earlier)."""
+        atomizer = Atomizer()
+        ep1 = self._ep("Alice is a teacher.", session_id="sess-1")
+        ep2 = self._ep("Bob is an engineer.", session_id="sess-1")
+        ep3 = self._ep("He loves coding.", session_id="sess-1")
+        atomizer.atomize(ep1, SESSION_DATE)
+        atomizer.atomize(ep2, SESSION_DATE)
+        atoms3 = atomizer.atomize(ep3, SESSION_DATE)
+        orbit_ids = {a.entity_orbit_id for a in atoms3}
+        assert "entity:bob" in orbit_ids
+        assert "entity:alice" not in orbit_ids
+
+    def test_holonomy_detected_when_merge_loop_exists(self) -> None:
+        """EntityGroupoid.has_holonomy() detects cycles in the merge-edge graph.
+
+        The merge() API prevents loops in single-threaded use, but concurrent writers
+        can create cycles. We inject one directly to test the detection algorithm.
+        """
+        from ai_knot_v2.core.groupoid import EntityGroupoid
+
+        g = EntityGroupoid()
+        g._orbits["alice"] = "entity:alice"  # noqa: SLF001
+        g._orbits["bob"] = "entity:bob"  # noqa: SLF001
+        # Inject a cycle: alice→bob→alice
+        g._merge_edges["entity:alice"] = "entity:bob"  # noqa: SLF001
+        g._merge_edges["entity:bob"] = "entity:alice"  # noqa: SLF001
+        assert g.has_holonomy()
+
+    def test_no_holonomy_for_clean_merges(self) -> None:
+        """Linear merge chain without loops has no holonomy."""
+        from ai_knot_v2.core.groupoid import EntityGroupoid
+
+        g = EntityGroupoid()
+        g.resolve("Alice")
+        g.resolve("Ali")
+        g.resolve("A. Smith")
+        g.merge("Alice", "Ali")
+        g.merge("Alice", "A. Smith")
+        assert not g.has_holonomy()
