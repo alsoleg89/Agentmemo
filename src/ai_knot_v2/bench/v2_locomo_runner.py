@@ -27,7 +27,7 @@ from ai_knot_v2.core.types import ReaderBudget
 _DEFAULT_DATA = Path(__file__).parents[5] / "aiknotbench" / "data" / "locomo10.json"
 
 _DEFAULT_BUDGET = ReaderBudget(
-    max_atoms=60,
+    max_atoms=100,  # Sprint 13 sweep: sweet-spot; tokens not binding above 8000
     max_tokens=8000,
     require_dependency_closure=True,
 )
@@ -141,7 +141,11 @@ class ConvResult:
     question_results: list[QuestionResult] = field(default_factory=list)
 
 
-def run_conversation(conv: LocomoConvData) -> ConvResult:
+def run_conversation(
+    conv: LocomoConvData,
+    max_atoms: int = 100,
+    max_tokens: int = 8000,
+) -> ConvResult:
     """Ingest conversation turns, score all QA pairs."""
     api = MemoryAPI(db_path=":memory:")
 
@@ -189,7 +193,9 @@ def run_conversation(conv: LocomoConvData) -> ConvResult:
         }
 
         # Recall
-        recall_resp = api.recall(RecallRequest(query=qa.question, max_atoms=60, max_tokens=8000))
+        recall_resp = api.recall(
+            RecallRequest(query=qa.question, max_atoms=max_atoms, max_tokens=max_tokens)
+        )
         result_atom_ids = {a.atom_id for a in recall_resp.atoms}
         result_atoms = [a for a in all_atoms if a.atom_id in result_atom_ids]
 
@@ -291,6 +297,12 @@ def main() -> None:
         default=_DEFAULT_DATA,
         help="Path to locomo10.json",
     )
+    parser.add_argument(
+        "--max-atoms", type=int, default=100, help="Max atoms in recall budget (default 100)"
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=8000, help="Max tokens in recall budget (default 8000)"
+    )
     args = parser.parse_args()
 
     if not args.data.exists():
@@ -305,7 +317,7 @@ def main() -> None:
         n_turns = len(conv.turns)
         n_qa = len(conv.qa_pairs)
         print(f"Running conv {conv.conv_idx} ({n_turns} turns, {n_qa} QA) ...")
-        cr = run_conversation(conv)
+        cr = run_conversation(conv, max_atoms=args.max_atoms, max_tokens=args.max_tokens)
         results.append(cr)
 
     agg = aggregate(results)
