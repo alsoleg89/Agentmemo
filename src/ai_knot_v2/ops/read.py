@@ -358,6 +358,7 @@ def select_candidates(
     # Submodular-greedy: add atoms with diversity constraint
     selected: list[MemoryAtom] = []
     selected_masks: list[int] = []
+    selected_pred_obj: set[tuple[str, str | None]] = set()
 
     for _, atom in scored:
         if len(selected) >= budget.max_atoms:
@@ -368,15 +369,21 @@ def select_candidates(
         if not selected:
             selected.append(atom)
             selected_masks.append(atom_mask)
+            selected_pred_obj.add((atom.predicate, atom.object_value))
             continue
 
         # Compute minimum distance to already-selected atoms
         min_dist = min(action_distance(atom_mask, m) for m in selected_masks)
 
-        # Accept if diverse enough OR if mask is zero (ambient facts always pass)
-        if min_dist >= _MIN_DIVERSITY_EPSILON or atom_mask == 0:
+        # Distinct (predicate, object_value) pairs are genuinely different facts
+        # even when action_affect_mask is identical (e.g. two lives_in atoms).
+        distinct_content = (atom.predicate, atom.object_value) not in selected_pred_obj
+
+        # Accept if diverse enough, ambient (mask=0), or carries distinct content
+        if min_dist >= _MIN_DIVERSITY_EPSILON or atom_mask == 0 or distinct_content:
             selected.append(atom)
             selected_masks.append(atom_mask)
+            selected_pred_obj.add((atom.predicate, atom.object_value))
 
     return selected
 

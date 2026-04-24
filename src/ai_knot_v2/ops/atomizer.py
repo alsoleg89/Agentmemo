@@ -369,6 +369,8 @@ def _canonical_predicate(predicate_raw: str, pattern_name: str | None = None) ->
 
 
 _FIRST_PERSON = re.compile(r"^(i|me|my|mine|myself)$", re.I)
+# Adverbs that may appear between "I" and a verb in extracted subjects ("I now", "I also", …)
+_SUBJ_ADV = re.compile(r"^(i)\s+(now|also|just|still|already|recently|finally|actually)$", re.I)
 
 # Third-person pronouns that can be resolved via within-session coreference
 _THIRD_SG = re.compile(r"^(she|he|her|him|his|hers)$", re.I)
@@ -410,6 +412,10 @@ class Atomizer:
 
         for clause in clauses:
             subj_raw = clause.subject_raw
+
+            # Normalize "I now / I also / I just …" → "I" before resolution
+            if _SUBJ_ADV.match(subj_raw):
+                subj_raw = "I"
 
             # Entity resolution: first-person → speaker name
             if _FIRST_PERSON.match(subj_raw):

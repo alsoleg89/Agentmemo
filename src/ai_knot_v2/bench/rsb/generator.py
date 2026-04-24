@@ -242,6 +242,162 @@ def _scheduling_scenario_3() -> RSBScenario:
 
 
 # ---------------------------------------------------------------------------
+# Preference domain scenarios (Sprint 24-25)
+# ---------------------------------------------------------------------------
+
+
+def _preference_scenario_1() -> RSBScenario:
+    """RSB-P1: Dietary preference must survive noise and be recalled precisely."""
+    turns = [
+        RSBTurn("user", "I am vegetarian — I don't eat meat or fish.", timestamp=1_700_000_000),
+        RSBTurn("user", "I've been vegetarian for five years.", timestamp=1_700_000_060),
+    ]
+    noise = _noise(base_ts=1_700_001_000)
+    return RSBScenario(
+        name="RSB-P1",
+        domain="preference",
+        description="Dietary restriction must be recalled precisely after noise",
+        turns=tuple(turns + noise),
+        questions=(
+            RSBQuestion(
+                text="What are my dietary restrictions?",
+                expected_predicates=("is", "prefers", "avoids"),
+                expected_objects=("vegetarian",),
+                must_not_recall=("meat eater", "omnivore"),
+            ),
+        ),
+    )
+
+
+def _preference_scenario_2() -> RSBScenario:
+    """RSB-P2: Updated preference must replace old one."""
+    turns = [
+        RSBTurn("user", "I prefer tea over coffee.", timestamp=1_700_000_000),
+        RSBTurn(
+            "user",
+            "Actually I switched to coffee — I drink coffee every morning now.",
+            timestamp=1_700_001_000,
+        ),
+    ]
+    return RSBScenario(
+        name="RSB-P2",
+        domain="preference",
+        description="Updated beverage preference must reflect the most recent statement",
+        turns=tuple(turns),
+        questions=(
+            RSBQuestion(
+                text="What hot drink do I prefer?",
+                expected_predicates=("prefers", "drinks", "is"),
+                expected_objects=("coffee",),
+            ),
+        ),
+    )
+
+
+def _preference_scenario_3() -> RSBScenario:
+    """RSB-P3: Hobby preference captured and recalled."""
+    turns = [
+        RSBTurn("user", "I enjoy hiking on weekends.", timestamp=1_700_000_000),
+        RSBTurn(
+            "user", "I also like photography — I take photos on my hikes.", timestamp=1_700_000_060
+        ),
+    ]
+    noise = _noise(base_ts=1_700_001_000)
+    return RSBScenario(
+        name="RSB-P3",
+        domain="preference",
+        description="Two concurrent hobbies must both be recalled",
+        turns=tuple(turns + noise),
+        questions=(
+            RSBQuestion(
+                text="What are my hobbies?",
+                expected_predicates=("enjoys", "likes", "is", "prefers"),
+                expected_objects=("hiking",),
+            ),
+            RSBQuestion(
+                text="What do I do on weekends?",
+                expected_predicates=("enjoys", "likes", "is", "prefers"),
+                expected_objects=("hiking",),
+            ),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Identity domain scenarios (Sprint 24-25)
+# ---------------------------------------------------------------------------
+
+
+def _identity_scenario_1() -> RSBScenario:
+    """RSB-I1: Profession must be recalled precisely."""
+    turns = [
+        RSBTurn("user", "I am a software engineer at a startup.", timestamp=1_700_000_000),
+        RSBTurn("user", "I have been coding for ten years.", timestamp=1_700_000_060),
+    ]
+    noise = _noise(base_ts=1_700_001_000)
+    return RSBScenario(
+        name="RSB-I1",
+        domain="identity",
+        description="Professional identity must survive noise and be recalled accurately",
+        turns=tuple(turns + noise),
+        questions=(
+            RSBQuestion(
+                text="What is my profession?",
+                expected_predicates=("is", "works_as", "works"),
+                expected_objects=("engineer", "software"),
+            ),
+        ),
+    )
+
+
+def _identity_scenario_2() -> RSBScenario:
+    """RSB-I2: Location update must replace old location."""
+    turns = [
+        RSBTurn("user", "I live in Berlin.", timestamp=1_700_000_000),
+        RSBTurn(
+            "user",
+            "I moved to Amsterdam last month — I now live in Amsterdam.",
+            timestamp=1_700_001_000,
+        ),
+    ]
+    return RSBScenario(
+        name="RSB-I2",
+        domain="identity",
+        description="Location update — most recent city must be recalled",
+        turns=tuple(turns),
+        questions=(
+            RSBQuestion(
+                text="Where do I live?",
+                expected_predicates=("lives_in", "is", "moved"),
+                expected_objects=("amsterdam",),
+            ),
+        ),
+    )
+
+
+def _identity_scenario_3() -> RSBScenario:
+    """RSB-I3: Family relationship must be stored and recalled."""
+    turns = [
+        RSBTurn("user", "My sister Emma is a doctor.", timestamp=1_700_000_000),
+        RSBTurn("user", "Emma works at a hospital in London.", timestamp=1_700_000_060),
+    ]
+    noise = _noise(base_ts=1_700_001_000)
+    return RSBScenario(
+        name="RSB-I3",
+        domain="identity",
+        description="Named family member's profession must be recalled",
+        turns=tuple(turns + noise),
+        questions=(
+            RSBQuestion(
+                text="What does my sister Emma do?",
+                expected_predicates=("is", "works_as", "works"),
+                expected_objects=("doctor", "emma"),
+            ),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -252,6 +408,12 @@ _ALL_SCENARIOS: list[RSBScenario] = [
     _scheduling_scenario_1(),
     _scheduling_scenario_2(),
     _scheduling_scenario_3(),
+    _preference_scenario_1(),
+    _preference_scenario_2(),
+    _preference_scenario_3(),
+    _identity_scenario_1(),
+    _identity_scenario_2(),
+    _identity_scenario_3(),
 ]
 
 
