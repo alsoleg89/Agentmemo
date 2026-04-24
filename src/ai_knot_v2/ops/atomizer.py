@@ -54,10 +54,16 @@ _TRIVIAL_SUBJ = re.compile(r"^(that|this|it|there|here|and|but|so)$", re.I)
 _EVENT_VERBS = (
     r"went|visited|attended|saw|met|received|got|found|made|created|started|joined|left"
     r"|moved|tried|began|finished|completed|took|gave|brought|sent|used|bought|learned"
-    r"|studied|built|wrote|read|played|ran|ran|walked|cooked|painted|drew|sang|won"
+    r"|studied|built|wrote|read|played|ran|walked|cooked|painted|drew|sang|won"
     r"|lost|helped|told|asked|showed|decided|realized|mentioned|said|talked|spoke"
     r"|called|texted|reached|heard|felt|thought|knew|remembered|forgot|wanted"
-    r"|needed|liked|loved|hated|preferred|chose|picked|found|noticed|saw|watched"
+    r"|needed|liked|loved|hated|preferred|chose|picked|noticed|watched"
+    r"|graduated|married|divorced|retired|hired|adopted|rescued|traveled|flew|drove"
+    r"|sailed|competed|opened|closed|launched|released|published|submitted|applied"
+    r"|baked|cleaned|fixed|repaired|hiked|swam|biked|cycled|broke|hurt|injured"
+    r"|celebrated|organized|planned|booked|reserved|cancelled|scheduled|rescheduled"
+    r"|signed|agreed|promised|confirmed|announced|discovered|invented|designed"
+    r"|developed|deployed|shipped|sold|purchased|rented|leased|donated|volunteered"
 )
 
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [

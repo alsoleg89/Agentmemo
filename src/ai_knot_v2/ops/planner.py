@@ -69,8 +69,18 @@ def reduction_score(
     # 1. Risk severity contribution
     score += atom.risk_severity * 2.0
 
-    # 2. Text relevance
-    q_words = {w.lower() for w in query.split() if len(w) > 3}
+    # 2. Text relevance (with possessive/punctuation stripping)
+    import re as _re
+
+    _strip = _re.compile(r"[?.!,;:\"']+$")
+    _poss = _re.compile(r"'s?$|s'$")
+
+    def _nw(w: str) -> str:
+        w = _strip.sub("", w)
+        w = _poss.sub("", w)
+        return w.lower()
+
+    q_words = {_nw(w) for w in query.split() if len(_nw(w)) > 3}
     obj_words = {w.lower() for w in (atom.object_value or "").split() if len(w) > 3}
     subj_words = {w.lower() for w in (atom.subject or "").split() if len(w) > 3}
     overlap = len(q_words & (obj_words | subj_words))
@@ -177,10 +187,17 @@ def handle_contradictions(
         elif b.credence > a.credence:
             remove_ids.add(a.atom_id)
         else:
-            # Equal credence → safe-abstain: remove both
-            remove_ids.add(a.atom_id)
-            remove_ids.add(b.atom_id)
-            abstain_ids.extend([a.atom_id, b.atom_id])
+            # Equal credence — use observation_time as tiebreaker.
+            # In temporal updates (job change, move, etc.) the later observation wins.
+            # Only true simultaneous contradictions become abstains.
+            if a.observation_time != b.observation_time:
+                older = a if a.observation_time < b.observation_time else b
+                remove_ids.add(older.atom_id)
+            else:
+                # Truly simultaneous contradiction → safe-abstain: remove both
+                remove_ids.add(a.atom_id)
+                remove_ids.add(b.atom_id)
+                abstain_ids.extend([a.atom_id, b.atom_id])
 
     resolved = [a for a in pack if a.atom_id not in remove_ids]
     return resolved, abstain_ids

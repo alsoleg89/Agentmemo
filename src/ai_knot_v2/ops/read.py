@@ -78,6 +78,199 @@ def extract_intervention(query: str) -> tuple[Intervention, ActionClass]:
 
 _MIN_DIVERSITY_EPSILON = 0.1  # Minimum action_distance to add a diverse atom
 
+# ---------------------------------------------------------------------------
+# Query preprocessing helpers
+# ---------------------------------------------------------------------------
+
+_STRIP_PUNCT = re.compile(r"[?.!,;:\"']+$")
+_POSSESSIVE = re.compile(r"'s?$|s'$")
+
+
+def _normalize_qword(w: str) -> str:
+    """Strip trailing punctuation and possessives ('s / s') from a query word."""
+    w = _STRIP_PUNCT.sub("", w)
+    w = _POSSESSIVE.sub("", w)
+    return w.lower()
+
+
+# Words that look like proper nouns (capitalized) but are not entity names
+_GRAMMAR_WORDS: frozenset[str] = frozenset(
+    {
+        "what",
+        "where",
+        "when",
+        "who",
+        "why",
+        "how",
+        "which",
+        "did",
+        "does",
+        "is",
+        "was",
+        "were",
+        "has",
+        "had",
+        "will",
+        "would",
+        "could",
+        "should",
+        "the",
+        "this",
+        "that",
+        "their",
+        "there",
+        "these",
+        "those",
+        "then",
+        "than",
+        "they",
+        "them",
+        "tell",
+        "give",
+        "list",
+        "show",
+        "find",
+        "describe",
+        "explain",
+        "do",
+        "have",
+        "be",
+        "are",
+        "can",
+        "may",
+        "must",
+        "shall",
+        "and",
+        "but",
+        "or",
+        "not",
+        "any",
+        "all",
+        "some",
+        "few",
+        "yes",
+        "no",
+        "very",
+        "much",
+        "many",
+        "more",
+        "most",
+        "in",
+        "on",
+        "at",
+        "to",
+        "from",
+        "with",
+        "for",
+        "about",
+        "of",
+        "by",
+        "if",
+        "as",
+        "so",
+        "up",
+        "out",
+        "into",
+        "onto",
+    }
+)
+
+
+_PRONOUNS: frozenset[str] = frozenset(
+    {
+        "i",
+        "me",
+        "my",
+        "mine",
+        "myself",
+        "you",
+        "your",
+        "yours",
+        "yourself",
+        "he",
+        "him",
+        "his",
+        "himself",
+        "she",
+        "her",
+        "hers",
+        "herself",
+        "it",
+        "its",
+        "itself",
+        "we",
+        "us",
+        "our",
+        "ours",
+        "ourselves",
+        "they",
+        "them",
+        "their",
+        "theirs",
+        "themselves",
+    }
+)
+
+
+def _extract_proper_nouns(query: str) -> list[str]:
+    """Return normalized proper nouns from query, excluding grammar words.
+
+    A proper noun is a token that starts uppercase and is not a known
+    grammar or question word. Used for single-entity routing.
+    """
+    nouns = []
+    for w in query.split():
+        if not w or not w[0].isupper():
+            continue
+        norm = _normalize_qword(w)
+        if len(norm) >= 3 and norm not in _GRAMMAR_WORDS:
+            nouns.append(norm)
+    return nouns
+
+
+# Generic question-vocabulary → canonical predicate hints.
+# Boosts atoms whose predicate matches a concept implied by the query word.
+_SEMANTIC_HINTS: dict[str, list[str]] = {
+    "job": ["works_at"],
+    "work": ["works_at"],
+    "career": ["works_at", "is"],
+    "employer": ["works_at"],
+    "company": ["works_at"],
+    "occupation": ["works_at", "is"],
+    "profession": ["works_at", "is"],
+    "live": ["lives_in"],
+    "lives": ["lives_in"],
+    "home": ["lives_in"],
+    "city": ["lives_in", "moved_to"],
+    "town": ["lives_in"],
+    "neighborhood": ["lives_in"],
+    "sport": ["prefers"],
+    "food": ["prefers"],
+    "hobby": ["prefers"],
+    "interest": ["prefers"],
+    "activity": ["prefers"],
+    "married": ["is"],
+    "husband": ["has", "is"],
+    "wife": ["has", "is"],
+    "partner": ["has", "is"],
+    "child": ["has"],
+    "children": ["has"],
+    "kid": ["has"],
+    "kids": ["has"],
+    "salary": ["has", "has_salary"],
+    "income": ["has", "has_salary"],
+    "earn": ["has_salary"],
+    "degree": ["has", "is"],
+    "school": ["attended", "has"],
+    "study": ["studied", "has"],
+    "health": ["has", "is"],
+    "condition": ["has", "is"],
+    "diagnosis": ["has", "is"],
+    "pet": ["has"],
+    "dog": ["has"],
+    "cat": ["has"],
+}
+
 
 def select_candidates(
     library: AtomLibrary,
@@ -120,22 +313,41 @@ def select_candidates(
     if not all_atoms:
         return []
 
-    q_lower = query.lower()
+    # Normalize query words: strip possessives and trailing punctuation
+    normalized_qwords = [_normalize_qword(w) for w in query.split() if _normalize_qword(w)]
+    # Main overlap word set (4+ chars to avoid common stop words)
+    words = {w for w in normalized_qwords if len(w) > 3}
+    # Semantic predicate hints from all query words ≥ 3 chars
+    hint_predicates: set[str] = set()
+    for qw in normalized_qwords:
+        if len(qw) >= 3 and qw in _SEMANTIC_HINTS:
+            hint_predicates.update(_SEMANTIC_HINTS[qw])
+
+    # Query words for subject matching: no length filter but strip pronouns.
+    # Allows short proper names (Jim, Bob, Sam) to match; prevents false boost
+    # from pronoun atoms (she, he) when query contains pronouns.
+    words_nonpron = {w for w in normalized_qwords if w not in _PRONOUNS}
+
     scored: list[tuple[float, MemoryAtom]] = []
     for atom in all_atoms:
         base_score = 0.0
         if atom.risk_class in relevant_risk:
             base_score += 1.0
-        # Text overlap bonus: subject, object, AND predicate
+        # Text overlap bonus: subject, object, AND predicate.
+        # Subject uses non-pronoun normalized words (catches short names like Jim).
+        # Obj/pred use 4+ char words.
         obj = (atom.object_value or "").lower()
         subj = (atom.subject or "").lower()
         pred = atom.predicate.replace("_", " ")
-        words = {w for w in q_lower.split() if len(w) > 3}
+        # Exclude pronoun subjects from subject matching (unresolved references)
+        subj_nonpron = {w for w in subj.split() if w not in _PRONOUNS}
         obj_words = {w for w in obj.split() if len(w) > 3}
-        subj_words = {w for w in subj.split() if len(w) > 3}
         pred_words = {w for w in pred.split() if len(w) > 3}
-        overlap = len(words & (obj_words | subj_words | pred_words))
+        overlap = len(words_nonpron & subj_nonpron) + len(words & (obj_words | pred_words))
         base_score += overlap * 0.3
+        # Semantic hint: boost atoms whose predicate is implied by a query concept
+        if atom.predicate in hint_predicates:
+            base_score += 0.4
         # High-risk atoms get priority
         base_score += atom.risk_severity * 0.5
         scored.append((base_score, atom))
