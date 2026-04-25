@@ -1,7 +1,7 @@
 {
   "_meta": {
     "language": "en",
-    "version": 1,
+    "version": 2,
     "description": "English lexicon for v2 LOCOMO bridge: intent routing + entity filtering + render hints. Add ru.json (or any-lang.json) with same schema for new languages."
   },
 
@@ -16,11 +16,23 @@
 
   "temporal_tokens": [
     "when", "before", "after", "during", "while", "since", "until",
-    "ago", "yesterday", "today", "tomorrow", "earlier", "later", "recent"
+    "ago", "yesterday", "today", "tomorrow", "earlier", "later",
+    "recent", "recently", "previously", "first", "last",
+    "year", "years", "month", "months", "week", "weeks", "day", "days"
   ],
 
   "single_fact_phrases": [
-    "what is", "where is", "who is", "where does", "where did"
+    "what is ", "where is ", "where does ", "where did ", "where do ",
+    "who is ", "what's ", "where's ", "who's "
+  ],
+
+  "pronoun_tokens": [
+    "she", "he", "her", "him", "his", "hers",
+    "they", "them", "their", "theirs"
+  ],
+
+  "abstain_hint_tokens": [
+    "ever", "any", "anything", "anyone"
   ],
 
   "stopwords_cap": [

@@ -33,6 +33,7 @@ from ai_knot_v2.bench._prompts import ANSWER_SYSTEM, JUDGE_SYSTEM, verify_prompt
 from ai_knot_v2.bench.ccb.render import render_pack_eswp
 from ai_knot_v2.bench.cwp.lineage_render import render_pack_cwp, render_pack_raw_annotated
 from ai_knot_v2.bench.cwp.persistence import compute_pct_signatures
+from ai_knot_v2.bench.lexicon import Lexicon, load_lexicon
 from ai_knot_v2.bench.v2_locomo_runner import LocomoConvData, parse_locomo_json
 from ai_knot_v2.core.episode import RawEpisode
 
@@ -102,46 +103,44 @@ def _bm25_search(index: dict[str, Any], query: str, top_k: int = 12) -> list[str
 
 
 # ---------------------------------------------------------------------------
-# Intent routing (lexicon-driven; was hardcoded EN — now per-language file)
+# Intent routing — lexicon-driven (per-language vocab in bench/lexicons/<lang>.json)
 # ---------------------------------------------------------------------------
 
 
-_AGGREGATION_TOKENS = frozenset(
-    {
-        "list",
-        "all",
-        "every",
-        "various",
-        "different",
-        "describe",
-        "enumerate",
-        "overview",
-        "summary",
-        "summariz",
-        "summar",
-    }
-)
-_AGGREGATION_PHRASES = (
-    "how many",
-    "tell me about",
-    "what are",
-    "what does",
-    "what did",
-    "what has",
-    "what have",
-    "what do",
-    "what were",
-    "know about",
-)
-
-
-def _is_aggregate_query(query: str) -> bool:
+def _is_aggregate_query(query: str, lex: Lexicon) -> bool:
     """Detect 'aggregation' intent (need ALL mentions, not single best fact)."""
     q_lower = query.lower()
-    if any(p in q_lower for p in _AGGREGATION_PHRASES):
+    if any(p in q_lower for p in lex.aggregation_phrases):
         return True
     toks = set(_tokenize(query))
-    return bool(toks & _AGGREGATION_TOKENS)
+    return bool(toks & lex.aggregation_tokens)
+
+
+def _is_temporal_query(query: str, lex: Lexicon) -> bool:
+    """Detect temporal intent (when/before/after/during)."""
+    return bool(set(_tokenize(query)) & lex.temporal_tokens)
+
+
+def _is_entity_lookup_query(query: str, lex: Lexicon) -> bool:
+    """Detect single-fact entity lookup (what is X's Y, where does X live)."""
+    if _is_aggregate_query(query, lex):
+        return False  # aggregate wins (broader)
+    q_lower = query.lower().strip()
+    return any(q_lower.startswith(p) for p in lex.single_fact_phrases)
+
+
+def _is_pronoun_heavy_query(query: str, lex: Lexicon) -> bool:
+    """Detect query that relies heavily on pronoun resolution."""
+    toks = _tokenize(query)
+    if not toks:
+        return False
+    pronoun_count = sum(1 for t in toks if t in lex.pronoun_tokens)
+    return pronoun_count >= 1 and pronoun_count / len(toks) >= 0.10
+
+
+def _has_abstain_hint(query: str, lex: Lexicon) -> bool:
+    """Detect query that may have no answer ('did X ever ...', 'has X any ...')."""
+    return bool(set(_tokenize(query)) & lex.abstain_hint_tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +521,7 @@ def run_conversation(
     mention_expand: bool = False,
     ribbon_radius: int = 0,
     final_top_k: int = 18,
+    lex: Lexicon | None = None,
 ) -> ConvResult:
     """Ingest conv, then for each QA: recall → render → answer → judge.
 
@@ -531,6 +531,8 @@ def run_conversation(
     render_mode:    "raw"       → raw episode turns + dates (v1-style)
                     "atoms"     → sparse triples (S1 default)
     """
+    if lex is None:
+        lex = load_lexicon("en")
     api = MemoryAPI(db_path=":memory:")
 
     episodes: list[EpisodeIn] = []
@@ -583,6 +585,16 @@ def run_conversation(
         atoms: list[Any] = []
         ep_ids_for_render: list[str] = []
 
+        # Intent classification — exposed for future per-intent strategies.
+        # Empirical 2-conv showed naive per-intent param tuning regresses cat3 by -15pp
+        # (benchmark-shaping risk). Keep detection, do NOT change retrieval params here.
+        is_aggregate = _is_aggregate_query(qa.question, lex)
+        is_pronoun_heavy = _is_pronoun_heavy_query(qa.question, lex)
+
+        eff_top_k = bm25_top_k
+        eff_ribbon = ribbon_radius
+        eff_final_top_k = final_top_k
+
         # For lineage mode, force atom retrieval so we have claims to render trees for.
         retr_eff = retrieval_mode
         if render_mode == "lineage" and retrieval_mode == "raw-bm25":
@@ -600,26 +612,24 @@ def run_conversation(
                     if eid not in seen and eid in episodes_lookup:
                         atom_eps.append(eid)
                         seen.add(eid)
-            ep_ids_for_render = atom_eps[:bm25_top_k]
+            ep_ids_for_render = atom_eps[:eff_top_k]
 
         if retr_eff in ("raw-bm25", "hybrid"):
             assert bm25_index is not None
-            bm25_eps = _bm25_search(bm25_index, qa.question, top_k=bm25_top_k)
+            bm25_eps = _bm25_search(bm25_index, qa.question, top_k=eff_top_k)
             if retr_eff == "raw-bm25":
                 ep_ids_for_render = bm25_eps
-            else:  # hybrid: union, BM25 first (higher precision for keyword queries)
+            else:
                 merged: list[str] = []
                 seen_h: set[str] = set()
                 for eid in bm25_eps + ep_ids_for_render:
                     if eid not in seen_h:
                         merged.append(eid)
                         seen_h.add(eid)
-                ep_ids_for_render = merged[:bm25_top_k]
+                ep_ids_for_render = merged[:eff_top_k]
 
-        if mention_expand and bm25_index is not None and _is_aggregate_query(qa.question):
-            # Intent gate (port of v1's aggregation routing): only expand for
-            # broad/aggregate queries where breadth > precision. Single-fact
-            # queries (most cat1) keep BM25-only precision.
+        # M2 mention expansion fires for aggregate OR pronoun-heavy queries
+        if mention_expand and bm25_index is not None and (is_aggregate or is_pronoun_heavy):
             ep_ids_for_render = _expand_with_mentions(
                 ep_ids_for_render,
                 qa.question,
@@ -628,15 +638,15 @@ def run_conversation(
                 bm25_index,
             )
 
-        if ribbon_radius > 0 and session_order:
+        if eff_ribbon > 0 and session_order:
             ep_ids_for_render = _expand_with_ribbons(
                 ep_ids_for_render,
                 episodes_lookup,
                 session_order,
-                radius=ribbon_radius,
+                radius=eff_ribbon,
             )
 
-        ep_ids_for_render = ep_ids_for_render[:final_top_k]
+        ep_ids_for_render = ep_ids_for_render[:eff_final_top_k]
 
         if render_mode == "lineage":
             if atoms:
@@ -777,6 +787,12 @@ def main() -> None:
     )
     parser.add_argument("--bm25-top-k", type=int, default=12)
     parser.add_argument(
+        "--lang",
+        type=str,
+        default="en",
+        help="Lexicon language code (loads bench/lexicons/<lang>.json)",
+    )
+    parser.add_argument(
         "--mention-expand",
         action="store_true",
         help="M2-lite: expand BM25 results with episodes mentioning query entities",
@@ -810,11 +826,16 @@ def main() -> None:
         sys.exit(1)
 
     client = OpenAI()
+    lex = load_lexicon(args.lang)
 
     print(f"Loading {args.convs} conversation(s) from {args.data} ...")
     locomo_convs = parse_locomo_json(args.data, limit=args.convs)
 
     print(f"Models: answer={answer_model}  judge={judge_model}")
+    print(
+        f"Lexicon: {lex.language} (aggregation_tokens={len(lex.aggregation_tokens)}, "
+        f"temporal_tokens={len(lex.temporal_tokens)}, pronoun_tokens={len(lex.pronoun_tokens)})"
+    )
     print(f"Recall budget: max_atoms={args.max_atoms}  max_tokens={args.max_tokens}\n")
 
     results: list[ConvResult] = []
@@ -834,6 +855,7 @@ def main() -> None:
             mention_expand=args.mention_expand,
             ribbon_radius=args.ribbon_radius,
             final_top_k=args.final_top_k,
+            lex=lex,
         )
         results.append(cv)
         print(f"  → {cv.total_atoms} atoms ingested\n")

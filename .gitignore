@@ -28,6 +28,8 @@ Thumbs.db
 *.swo
 *~
 .ai_knot/
+.ai_knot_v2/
+memvid/
 .claude/
 
 # Claude Code local settings

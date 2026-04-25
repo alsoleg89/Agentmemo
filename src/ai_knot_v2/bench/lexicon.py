@@ -34,6 +34,8 @@ class Lexicon:
     aggregation_phrases: tuple[str, ...]
     temporal_tokens: frozenset[str]
     single_fact_phrases: tuple[str, ...]
+    pronoun_tokens: frozenset[str]
+    abstain_hint_tokens: frozenset[str]
     stopwords_cap: frozenset[str]
     factual_predicates: frozenset[str]
     common_words: frozenset[str] = field(default_factory=frozenset)
@@ -57,8 +59,7 @@ def load_lexicon(lang: str = "en") -> Lexicon:
     path = _LEX_DIR / f"{lang}.json"
     if not path.exists():
         raise FileNotFoundError(
-            f"Lexicon not found: {path}. Available: "
-            f"{[p.stem for p in _LEX_DIR.glob('*.json')]}"
+            f"Lexicon not found: {path}. Available: {[p.stem for p in _LEX_DIR.glob('*.json')]}"
         )
     with open(path) as f:
         data = json.load(f)
@@ -68,6 +69,8 @@ def load_lexicon(lang: str = "en") -> Lexicon:
         aggregation_phrases=tuple(data.get("aggregation_phrases", [])),
         temporal_tokens=frozenset(data.get("temporal_tokens", [])),
         single_fact_phrases=tuple(data.get("single_fact_phrases", [])),
+        pronoun_tokens=frozenset(data.get("pronoun_tokens", [])),
+        abstain_hint_tokens=frozenset(data.get("abstain_hint_tokens", [])),
         stopwords_cap=frozenset(data.get("stopwords_cap", [])),
         factual_predicates=frozenset(data.get("factual_predicates", [])),
         common_words=_load_common_words(data.get("common_words_path", "")),
