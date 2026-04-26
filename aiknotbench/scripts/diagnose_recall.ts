@@ -405,9 +405,9 @@ async function main(): Promise<void> {
     const records: DiagnosticsRecord[] = [];
 
     for (const entry of entries) {
-      const convKey = `conv${entry.conv_idx}`;
-      const evKey = `${convKey}:qa${entry.qa_idx}`;
-      const goldEvidence = locomoQA.get(evKey) ?? [];
+      const convKey = `conv-${entry.conv_idx}`;
+      const locomoKey = `conv${entry.conv_idx}:qa${entry.qa_idx}`;
+      const goldEvidence = locomoQA.get(locomoKey) ?? [];
 
       // Resolve gold fact IDs from map (if available)
       const goldPerEvidence: Record<string, string[]> = {};
