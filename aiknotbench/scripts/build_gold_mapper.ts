@@ -232,13 +232,14 @@ async function main(): Promise<void> {
     if (evidenceIds.length === 0) continue;
 
     const turnMap = extractTurnMap(rawConv);
-    const convKey = `conv${convIdx}`;
+    const convKey = `conv-${convIdx}`;
 
     // Load facts from the agent namespace for this conv
     const kb = new KnowledgeBase({
       agentId: convKey,
       storage: "sqlite",
       dbPath: dbPathForRun,
+      command: process.env["AI_KNOT_COMMAND"],
     });
 
     try {
