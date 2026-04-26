@@ -74,6 +74,21 @@ CREATE TABLE IF NOT EXISTS snapshots (
 )
 """
 
+_CREATE_MENTION_GRAPH_TABLE = """
+CREATE TABLE IF NOT EXISTS mention_graph (
+    agent_id   TEXT NOT NULL,
+    entity     TEXT NOT NULL,
+    fact_id    TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (agent_id, entity, fact_id)
+)
+"""
+
+_CREATE_MENTION_GRAPH_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_mg_entity ON mention_graph(agent_id, entity)",
+    "CREATE INDEX IF NOT EXISTS idx_mg_fact   ON mention_graph(agent_id, fact_id)",
+]
+
 _INSERT_FACTS_SQL = """INSERT INTO facts
    (id, agent_id, content, type, importance, retention,
     access_count, tags, created_at, last_accessed,
@@ -119,7 +134,10 @@ class SQLiteStorage:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_CREATE_TABLE)
             conn.execute(_CREATE_SNAPSHOTS_TABLE)
+            conn.execute(_CREATE_MENTION_GRAPH_TABLE)
             for stmt in _CREATE_INDEXES:
+                conn.execute(stmt)
+            for stmt in _CREATE_MENTION_GRAPH_INDEXES:
                 conn.execute(stmt)
         self._migrate_db()
 
@@ -564,3 +582,41 @@ class SQLiteStorage:
                 "DELETE FROM snapshots WHERE agent_id = ? AND name = ?",
                 (agent_id, name),
             )
+
+    # ------------------------------------------------------------------
+    # Mention Graph API
+    # ------------------------------------------------------------------
+
+    def store_mention(
+        self, agent_id: str, entity: str, fact_id: str, confidence: float = 1.0
+    ) -> None:
+        """Insert or replace an entity→fact edge in the mention graph."""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO mention_graph"
+                " (agent_id, entity, fact_id, confidence) VALUES (?,?,?,?)",
+                (agent_id, entity, fact_id, confidence),
+            )
+
+    def facts_for_entity(self, agent_id: str, entity: str) -> list[str]:
+        """Return fact IDs associated with *entity* (case-sensitive)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT fact_id FROM mention_graph WHERE agent_id=? AND entity=?",
+                (agent_id, entity),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def entities_for_fact(self, agent_id: str, fact_id: str) -> list[str]:
+        """Return entity names associated with *fact_id*."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT entity FROM mention_graph WHERE agent_id=? AND fact_id=?",
+                (agent_id, fact_id),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def clear_mentions(self, agent_id: str) -> None:
+        """Remove all mention graph entries for *agent_id*."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM mention_graph WHERE agent_id=?", (agent_id,))

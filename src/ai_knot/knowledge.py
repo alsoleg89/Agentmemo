@@ -216,6 +216,15 @@ class KnowledgeBase(_LearningMixin):
         facts.append(fact)
         facts.extend(accepted_children)
         self._storage.save(self._agent_id, facts)
+
+        # Phase D: index entities in the mention graph (no-op if disabled or
+        # storage backend does not support store_mention).
+        from ai_knot.mention_graph import MENTION_GRAPH_ENABLED, index_fact_entities
+
+        if MENTION_GRAPH_ENABLED:
+            for f in [fact, *accepted_children]:
+                index_fact_entities(self._agent_id, f.id, f.content, self._storage)
+
         logger.info(
             "Added fact '%s' (+%d derived) to agent '%s'",
             content[:50],
@@ -651,6 +660,17 @@ class KnowledgeBase(_LearningMixin):
                         if any(len(t) > 2 for t in shared):
                             for related in related_facts:
                                 candidate_ids.add(related.id)
+
+        # Channel C extension: Mention Graph entity hop (raw-text facts, dated mode).
+        # Extracts named entities from the query and adds all facts that mention those
+        # entities via the mention_graph index.  Guards with hasattr so that storage
+        # backends that don't support mention_graph (e.g. YAML, Postgres) are a no-op.
+        from ai_knot.mention_graph import MENTION_GRAPH_ENABLED, hop_expand
+
+        if MENTION_GRAPH_ENABLED:
+            mg_fids = hop_expand(query, self._agent_id, self._storage)
+            candidate_ids |= {fid for fid in mg_fids if fid in fact_map}
+
         _trace_ch_c = (
             candidate_ids - _trace_ch_a - _trace_ch_b
             if trace is not None and _trace_ch_a is not None and _trace_ch_b is not None
