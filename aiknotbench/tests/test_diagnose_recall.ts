@@ -222,6 +222,73 @@ describe("computeDiagnosticsRecord — LexicalExpansionUplift", () => {
   });
 });
 
+describe("computeDiagnosticsRecord — PackPositionEntropy (A0.pack)", () => {
+  it("null when pack is empty", () => {
+    const entry = makeEntry({ pack: [], stage1_bm25: ["f1"] });
+    const rec = computeDiagnosticsRecord(entry, ["f1"], {}, ["D1:1"], "WRONG");
+    expect(rec.pack_position_entropy).toBeNull();
+  });
+
+  it("null when no gold in pack", () => {
+    const entry = makeEntry({ pack: ["f99", "f100"], stage1_bm25: ["f1", "f99", "f100"] });
+    const rec = computeDiagnosticsRecord(entry, ["f1"], {}, ["D1:1"], "WRONG");
+    expect(rec.pack_position_entropy).toBeNull();
+  });
+
+  it("0 entropy when all gold concentrated in one third", () => {
+    // Pack of 9 facts, gold all in head (positions 0-2)
+    const pack = ["f1", "f2", "f3", "x1", "x2", "x3", "x4", "x5", "x6"];
+    const entry = makeEntry({ pack, stage1_bm25: pack });
+    const rec = computeDiagnosticsRecord(entry, ["f1", "f2", "f3"], {}, [], "WRONG");
+    // All 3 gold in head → bins=[3,0,0] → H=0
+    expect(rec.pack_position_entropy).toBe(0);
+  });
+
+  it("positive entropy when gold spread across thirds", () => {
+    // Pack of 9 facts, gold in head + tail
+    const pack = ["f1", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "f2"];
+    const entry = makeEntry({ pack, stage1_bm25: pack });
+    const rec = computeDiagnosticsRecord(entry, ["f1", "f2"], {}, [], "WRONG");
+    // f1 at pos 0 (head), f2 at pos 8 (tail) → bins=[1,0,1] → H > 0
+    expect(rec.pack_position_entropy).toBeGreaterThan(0);
+  });
+});
+
+describe("computeDiagnosticsRecord — LostInMiddleSignal (A0.pack)", () => {
+  it("null when pack is empty", () => {
+    const entry = makeEntry({ pack: [], stage1_bm25: ["f1"] });
+    const rec = computeDiagnosticsRecord(entry, ["f1"], {}, ["D1:1"], "WRONG");
+    expect(rec.lost_in_middle_signal).toBeNull();
+  });
+
+  it("0.0 when gold at head only (position 0 in 8-pack)", () => {
+    // Pack of 8 facts, middle = positions 2-5 (floor(8*0.25)=2, ceil(8*0.75)=6)
+    const pack = ["f1", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
+    const entry = makeEntry({ pack, stage1_bm25: pack });
+    const rec = computeDiagnosticsRecord(entry, ["f1"], {}, [], "WRONG");
+    // f1 at pos 0: not in [2, 6) → signal = 0
+    expect(rec.lost_in_middle_signal).toBe(0);
+  });
+
+  it("1.0 when all gold in middle 50%", () => {
+    // Pack of 8 facts, middle = [2, 6), gold at positions 2,3,4,5
+    const pack = ["x1", "x2", "f1", "f2", "f3", "f4", "x3", "x4"];
+    const entry = makeEntry({ pack, stage1_bm25: pack });
+    const rec = computeDiagnosticsRecord(entry, ["f1", "f2", "f3", "f4"], {}, [], "WRONG");
+    expect(rec.lost_in_middle_signal).toBe(1.0);
+  });
+
+  it("0.5 when half gold in middle", () => {
+    // Pack of 4 facts: gold at positions 0 (head) and 1 (middle for 4-pack)
+    // midStart=floor(4*0.25)=1, midEnd=ceil(4*0.75)=3 → middle=[1,3)
+    const pack = ["f1", "f2", "x1", "x2"];
+    const entry = makeEntry({ pack, stage1_bm25: pack });
+    const rec = computeDiagnosticsRecord(entry, ["f1", "f2"], {}, [], "WRONG");
+    // f1 at pos 0: not in [1,3); f2 at pos 1: in [1,3) → 1/2 = 0.5
+    expect(rec.lost_in_middle_signal).toBeCloseTo(0.5);
+  });
+});
+
 describe("computeSummary", () => {
   it("correctly counts LLM-fail bucket for cat1", () => {
     const records: DiagnosticsRecord[] = [
@@ -241,6 +308,8 @@ describe("computeSummary", () => {
         distractor_density: 0.5,
         reader_fail_despite_gold: true,
         lexical_expansion_uplift: null,
+        pack_position_entropy: 0.0,
+        lost_in_middle_signal: 0.0,
         answer_verdict: "WRONG",
         bucket: "LLM-fail",
       },
@@ -260,6 +329,8 @@ describe("computeSummary", () => {
         distractor_density: 1.0,
         reader_fail_despite_gold: false,
         lexical_expansion_uplift: null,
+        pack_position_entropy: null,
+        lost_in_middle_signal: null,
         answer_verdict: "WRONG",
         bucket: "hard-miss",
       },

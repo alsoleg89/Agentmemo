@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildBucketTable,
   computeBucketMigrations,
+  computeReaderRecoveryRate,
   renderBucketTable,
   renderMigrationTable,
   type BucketMigration,
@@ -32,6 +33,8 @@ function makeRecord(
     distractor_density: 0.5,
     reader_fail_despite_gold: true,
     lexical_expansion_uplift: null,
+    pack_position_entropy: null,
+    lost_in_middle_signal: null,
     answer_verdict: overrides.verdict ?? "WRONG",
     bucket: overrides.bucket ?? "LLM-fail",
     ...overrides,
@@ -131,6 +134,59 @@ describe("renderBucketTable", () => {
   });
 });
 
+describe("computeReaderRecoveryRate (A0.pack)", () => {
+  it("null rate when baseline has no LLM-fail records", () => {
+    const base = [makeRecord({ qa_idx: 0, bucket: "hard-miss", answer_verdict: "WRONG" })];
+    const cand = [makeRecord({ qa_idx: 0, bucket: "correct", answer_verdict: "CORRECT" })];
+    const stats = computeReaderRecoveryRate(base, cand);
+    expect(stats.rate).toBeNull();
+    expect(stats.total).toBe(0);
+  });
+
+  it("100% when all LLM-fail become CORRECT", () => {
+    const base = [
+      makeRecord({ conv_id: "conv0", qa_idx: 0, bucket: "LLM-fail", answer_verdict: "WRONG" }),
+      makeRecord({ conv_id: "conv0", qa_idx: 1, bucket: "LLM-fail", answer_verdict: "WRONG" }),
+    ];
+    const cand = [
+      makeRecord({ conv_id: "conv0", qa_idx: 0, bucket: "correct", answer_verdict: "CORRECT" }),
+      makeRecord({ conv_id: "conv0", qa_idx: 1, bucket: "correct", answer_verdict: "CORRECT" }),
+    ];
+    const stats = computeReaderRecoveryRate(base, cand);
+    expect(stats.rate).toBe(1.0);
+    expect(stats.recovered).toBe(2);
+    expect(stats.total).toBe(2);
+  });
+
+  it("50% when half of LLM-fail become CORRECT", () => {
+    const base = [
+      makeRecord({ conv_id: "conv0", qa_idx: 0, bucket: "LLM-fail", answer_verdict: "WRONG" }),
+      makeRecord({ conv_id: "conv0", qa_idx: 1, bucket: "LLM-fail", answer_verdict: "WRONG" }),
+    ];
+    const cand = [
+      makeRecord({ conv_id: "conv0", qa_idx: 0, bucket: "correct", answer_verdict: "CORRECT" }),
+      makeRecord({ conv_id: "conv0", qa_idx: 1, bucket: "LLM-fail", answer_verdict: "WRONG" }),
+    ];
+    const stats = computeReaderRecoveryRate(base, cand);
+    expect(stats.rate).toBeCloseTo(0.5);
+  });
+
+  it("non-LLM-fail baseline records are ignored", () => {
+    const base = [
+      makeRecord({ conv_id: "conv0", qa_idx: 0, bucket: "LLM-fail", answer_verdict: "WRONG" }),
+      makeRecord({ conv_id: "conv0", qa_idx: 1, bucket: "hard-miss", answer_verdict: "WRONG" }),
+    ];
+    const cand = [
+      makeRecord({ conv_id: "conv0", qa_idx: 0, bucket: "correct", answer_verdict: "CORRECT" }),
+      makeRecord({ conv_id: "conv0", qa_idx: 1, bucket: "correct", answer_verdict: "CORRECT" }),
+    ];
+    const stats = computeReaderRecoveryRate(base, cand);
+    expect(stats.total).toBe(1); // only LLM-fail counted
+    expect(stats.recovered).toBe(1);
+    expect(stats.rate).toBe(1.0);
+  });
+});
+
 describe("renderMigrationTable", () => {
   it("shows total questions moved", () => {
     const migrations: BucketMigration[] = [
@@ -147,5 +203,13 @@ describe("renderMigrationTable", () => {
     expect(md).toContain("Total questions moved: 1");
     expect(md).toContain("hard-miss");
     expect(md).toContain("LLM-fail");
+  });
+
+  it("shows ReaderRecoveryRate when recovery stats provided", () => {
+    const migrations: BucketMigration[] = [];
+    const recovery = { recovered: 3, total: 10, rate: 0.3 };
+    const md = renderMigrationTable("base", "cand", migrations, recovery);
+    expect(md).toContain("ReaderRecoveryRate");
+    expect(md).toContain("30.0%");
   });
 });

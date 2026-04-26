@@ -32,6 +32,8 @@ export interface BucketTable {
   totals: Record<string, number>;
   avgPoolGoldRecallByBucket: Record<string, number>;
   avgPackGoldRecallByBucket: Record<string, number>;
+  /** Average fraction of gold in middle 50% of pack (A0.pack signal). */
+  avgLostInMiddleSignal: number | null;
 }
 
 export interface BucketMigration {
@@ -41,6 +43,15 @@ export interface BucketMigration {
   fromBucket: string;
   toBucket: string;
   verdictChange: string;
+}
+
+export interface ReaderRecoveryStats {
+  /** LLM-fail questions in baseline that became CORRECT in candidate. */
+  recovered: number;
+  /** Total LLM-fail questions in baseline. */
+  total: number;
+  /** Fraction = recovered / total. null if no LLM-fail in baseline. */
+  rate: number | null;
 }
 
 // ---- Helpers ----------------------------------------------------------------
@@ -98,12 +109,17 @@ export function buildBucketTable(
     avgPackGoldRecallByBucket[bucket] = avg(packByBucket[bucket] ?? []);
   }
 
+  const limSignals = records
+    .map((r) => (r as DiagnosticsRecord & { lost_in_middle_signal?: number | null }).lost_in_middle_signal)
+    .filter((v): v is number => v !== null && v !== undefined);
+
   return {
     runId,
     byCategory,
     totals,
     avgPoolGoldRecallByBucket,
     avgPackGoldRecallByBucket,
+    avgLostInMiddleSignal: limSignals.length > 0 ? avg(limSignals) : null,
   };
 }
 
@@ -132,6 +148,25 @@ export function computeBucketMigrations(
   return migrations;
 }
 
+export function computeReaderRecoveryRate(
+  baseRecords: DiagnosticsRecord[],
+  candRecords: DiagnosticsRecord[],
+): ReaderRecoveryStats {
+  const candMap = new Map(candRecords.map((r) => [`${r.conv_id}:${r.qa_idx}`, r]));
+  const llmFailBase = baseRecords.filter((r) => r.bucket === "LLM-fail");
+  if (llmFailBase.length === 0) return { recovered: 0, total: 0, rate: null };
+  let recovered = 0;
+  for (const base of llmFailBase) {
+    const cand = candMap.get(`${base.conv_id}:${base.qa_idx}`);
+    if (cand && cand.answer_verdict === "CORRECT") recovered++;
+  }
+  return {
+    recovered,
+    total: llmFailBase.length,
+    rate: recovered / llmFailBase.length,
+  };
+}
+
 // ---- Rendering --------------------------------------------------------------
 
 export function renderBucketTable(table: BucketTable): string {
@@ -142,6 +177,9 @@ export function renderBucketTable(table: BucketTable): string {
     "| Bucket | n | AvgPoolRecall | AvgPackRecall | Bottleneck |",
     "| --- | --- | --- | --- | --- |",
   ];
+  if (table.avgLostInMiddleSignal !== null) {
+    lines.splice(1, 0, `AvgLostInMiddleSignal: ${table.avgLostInMiddleSignal.toFixed(3)}`, "");
+  }
 
   const bottleneck: Record<string, string> = {
     "LLM-fail": "reader",
@@ -188,15 +226,23 @@ export function renderMigrationTable(
   baselineId: string,
   candidateId: string,
   migrations: BucketMigration[],
+  recovery?: ReaderRecoveryStats,
 ): string {
   const lines: string[] = [
     `# Bucket Migration: ${baselineId} → ${candidateId}`,
     "",
     `Total questions moved: ${migrations.length}`,
+  ];
+  if (recovery && recovery.rate !== null) {
+    lines.push(
+      `ReaderRecoveryRate: ${(recovery.rate * 100).toFixed(1)}% (${recovery.recovered}/${recovery.total} LLM-fail → CORRECT)`,
+    );
+  }
+  lines.push(
     "",
     "| conv | qa | cat | from | to | verdict |",
     "| --- | --- | --- | --- | --- | --- |",
-  ];
+  );
   for (const m of migrations) {
     lines.push(
       `| ${m.convId} | ${m.qaIdx} | ${m.category} | ${m.fromBucket} | ${m.toBucket} | ${m.verdictChange} |`,
@@ -260,9 +306,15 @@ async function main(): Promise<void> {
     }
 
     const migrations = computeBucketMigrations(baseRecords, candRecords);
-    const md = renderMigrationTable(baselineId, candidateId, migrations);
+    const recovery = computeReaderRecoveryRate(baseRecords, candRecords);
+    const md = renderMigrationTable(baselineId, candidateId, migrations, recovery);
     writeFileSync(outPath, md);
     console.log(`Migration table written to ${outPath} (${migrations.length} moved)`);
+    if (recovery.rate !== null) {
+      console.log(
+        `ReaderRecoveryRate: ${(recovery.rate * 100).toFixed(1)}% (${recovery.recovered}/${recovery.total} LLM-fail → CORRECT)`,
+      );
+    }
   } else {
     console.error(
       "Usage:\n" +

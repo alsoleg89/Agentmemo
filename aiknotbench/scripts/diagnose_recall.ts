@@ -3,13 +3,15 @@
  * diagnostics_raw.jsonl + gold mapper output.
  *
  * Metrics computed per question:
- *   RawGoldExists       — at least one gold evidence ID has matching facts in DB
- *   PoolGoldRecall@K    — fraction of gold fact IDs in Stage-1 candidate pool
+ *   RawGoldExists         — at least one gold evidence ID has matching facts in DB
+ *   PoolGoldRecall@K      — fraction of gold fact IDs in Stage-1 candidate pool
  *   PackGoldRecall@Budget — fraction of gold fact IDs in final evidence pack
- *   GoldPackPosition    — median char position of gold facts in pack (0-indexed)
- *   DistractorDensity   — non-gold / total in pack
+ *   GoldPackPosition      — median char position of gold facts in pack (0-indexed)
+ *   DistractorDensity     — non-gold / total in pack
  *   ReaderFailDespiteGold — verdict==WRONG and PackGoldRecall==1.0
  *   LexicalExpansionUplift — delta PoolGoldRecall with vs without lexical trace
+ *   PackPositionEntropy   — Shannon H of gold positions across pack thirds (A0.pack)
+ *   LostInMiddleSignal    — fraction of gold in middle 50% of pack (A0.pack)
  *
  * Usage:
  *   tsx scripts/diagnose_recall.ts --run <runId> [--convs 0,1] [--out <path>]
@@ -75,6 +77,8 @@ export interface DiagnosticsRecord {
   distractor_density: number | null;
   reader_fail_despite_gold: boolean | null;
   lexical_expansion_uplift: number | null;
+  pack_position_entropy: number | null;
+  lost_in_middle_signal: number | null;
   answer_verdict: string;
   bucket: "LLM-fail" | "partial-recall" | "low-recall" | "hard-miss" | "correct" | "unknown";
 }
@@ -91,6 +95,8 @@ export interface DiagnosticsSummary {
   }>;
   avg_distractor_density: number;
   reader_fail_despite_gold_count: number;
+  avg_lost_in_middle_signal: number | null;
+  avg_pack_position_entropy: number | null;
 }
 
 // ---- LOCOMO schema (minimal) -------------------------------------------------
@@ -146,6 +152,17 @@ function median(values: number[]): number | null {
   return sorted.length % 2 !== 0
     ? sorted[mid]!
     : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+function shannonEntropy(counts: number[]): number {
+  const total = counts.reduce((a, b) => a + b, 0);
+  if (total === 0) return 0;
+  return counts
+    .filter((c) => c > 0)
+    .reduce((h, c) => {
+      const p = c / total;
+      return h - p * Math.log2(p);
+    }, 0);
 }
 
 function allStage1Ids(
@@ -220,6 +237,25 @@ export function computeDiagnosticsRecord(
     distractorDensity = nonGold / packIds.length;
   }
 
+  // PackPositionEntropy (A0.pack) — Shannon H over thirds (head / middle / tail)
+  let packPositionEntropy: number | null = null;
+  // LostInMiddleSignal (A0.pack) — fraction of gold in middle 50% of pack
+  let lostInMiddleSignal: number | null = null;
+  if (packIds.length > 0 && goldPositions.length > 0) {
+    const P = packIds.length;
+    const bins = [0, 0, 0]; // head, middle, tail
+    for (const pos of goldPositions) {
+      if (pos < P / 3) bins[0]++;
+      else if (pos < (2 * P) / 3) bins[1]++;
+      else bins[2]++;
+    }
+    packPositionEntropy = shannonEntropy(bins);
+    const midStart = Math.floor(P * 0.25);
+    const midEnd = Math.ceil(P * 0.75);
+    const inMiddle = goldPositions.filter((p) => p >= midStart && p < midEnd).length;
+    lostInMiddleSignal = inMiddle / goldPositions.length;
+  }
+
   // ReaderFailDespiteGold
   const readerFailDespiteGold =
     packGoldRecall !== null && packGoldRecall >= 1.0 && verdict !== "CORRECT"
@@ -249,6 +285,8 @@ export function computeDiagnosticsRecord(
     distractor_density: distractorDensity,
     reader_fail_despite_gold: readerFailDespiteGold,
     lexical_expansion_uplift: lexicalExpansionUplift,
+    pack_position_entropy: packPositionEntropy,
+    lost_in_middle_signal: lostInMiddleSignal,
     answer_verdict: verdict,
     bucket,
   };
@@ -263,6 +301,10 @@ export function computeSummary(
   let totalDistractor = 0;
   let distractorCount = 0;
   let readerFailCount = 0;
+  let totalLostInMiddle = 0;
+  let lostInMiddleCount = 0;
+  let totalEntropy = 0;
+  let entropyCount = 0;
 
   for (const r of records) {
     buckets[r.bucket] = (buckets[r.bucket] ?? 0) + 1;
@@ -276,7 +318,7 @@ export function computeSummary(
         avg_pack_gold_recall: 0,
       };
     }
-    const cat = byCategory[catKey]!;
+    const cat = byCategory[catKey]!
 
     if (r.answer_verdict !== "CORRECT") {
       cat.total_wrong++;
@@ -294,6 +336,14 @@ export function computeSummary(
       distractorCount++;
     }
     if (r.reader_fail_despite_gold === true) readerFailCount++;
+    if (r.lost_in_middle_signal !== null) {
+      totalLostInMiddle += r.lost_in_middle_signal;
+      lostInMiddleCount++;
+    }
+    if (r.pack_position_entropy !== null) {
+      totalEntropy += r.pack_position_entropy;
+      entropyCount++;
+    }
   }
 
   // Normalize averages
@@ -312,6 +362,10 @@ export function computeSummary(
     avg_distractor_density:
       distractorCount > 0 ? totalDistractor / distractorCount : 0,
     reader_fail_despite_gold_count: readerFailCount,
+    avg_lost_in_middle_signal:
+      lostInMiddleCount > 0 ? totalLostInMiddle / lostInMiddleCount : null,
+    avg_pack_position_entropy:
+      entropyCount > 0 ? totalEntropy / entropyCount : null,
   };
 }
 
@@ -358,6 +412,12 @@ function renderSummaryMd(summary: DiagnosticsSummary): string {
     `Avg DistractorDensity: ${summary.avg_distractor_density.toFixed(3)}`,
     `ReaderFailDespiteGold: ${summary.reader_fail_despite_gold_count}`,
   );
+  if (summary.avg_lost_in_middle_signal !== null) {
+    lines.push(
+      `Avg LostInMiddleSignal: ${summary.avg_lost_in_middle_signal.toFixed(3)}`,
+      `Avg PackPositionEntropy: ${(summary.avg_pack_position_entropy ?? 0).toFixed(3)}`,
+    );
+  }
 
   return lines.join("\n");
 }
