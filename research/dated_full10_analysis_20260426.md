@@ -10,6 +10,12 @@ parallelism: 10 processes (one per conv)
 
 # Dated full-10 reproduction analysis (1167e70)
 
+## Status
+
+**`repro/dated-1167e70` is the validated pf3 baseline reproduction.**
+
+Aggregate matches pf3 full-10 exactly (60.5%). Future work that needs a "pf3-equivalent" reference run should check out this branch and use the reproduction commands at the bottom of this file. Do not re-investigate whether dated mode + Phase E SUT + gpt-4o-mini + text-embedding-3-small + top_k=60 reproduces pf3 — it does.
+
 ## TL;DR
 
 | metric | this run (partial) | pf3 full-10 | gap |
