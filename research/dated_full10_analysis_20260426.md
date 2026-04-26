@@ -12,23 +12,31 @@ parallelism: 10 processes (one per conv)
 
 ## Status
 
-**`repro/dated-1167e70` is the validated pf3 baseline reproduction.**
+**`repro/dated-1167e70` is the validated pf3 baseline reproduction (within ~1–2 pp).**
 
-Aggregate matches pf3 full-10 exactly (60.5%). Future work that needs a "pf3-equivalent" reference run should check out this branch and use the reproduction commands at the bottom of this file. Do not re-investigate whether dated mode + Phase E SUT + gpt-4o-mini + text-embedding-3-small + top_k=60 reproduces pf3 — it does.
+5 of 10 convs ran to full completion (0–4); 5 hit the OpenAI RPD wall mid-QA (5–9). Aggregate on the completed-conv subset is **62.5%** (476/762); on RPD-killed partial subset **61.8%** (321/519). Combined cumulative **62.2%** (797/1281, 86% of expected QA), vs pf3 full-10 60.5% — within 1–2 pp.
+
+Future work that needs a "pf3-equivalent" reference run should check out this branch and use the reproduction commands at the bottom of this file. Do not re-investigate whether dated mode + Phase E SUT + gpt-4o-mini + text-embedding-3-small + top_k=60 reproduces pf3 — it does, modulo helper-version drift and gpt-4o-mini snapshot drift (residuals on the order of ±2 pp).
 
 ## TL;DR
 
-| metric | this run (partial) | pf3 full-10 | gap |
+| metric | this run | pf3 full-10 | gap |
 |---|---|---|---|
-| aggregate (cat 1–4) | **723/1196 = 60.5%** | 60.5% | **±0.0pp** |
+| aggregate (cat 1–4) | **797/1281 = 62.2%** | 60.5% | +1.7pp |
 | cat1 (single-hop) | 102/263 = 38.8% | 40.4% | −1.6pp |
 | cat2 (multi-hop / temporal) | 151/310 = 48.7% | n/a | n/a |
 | cat3 (open-domain) | 47/91 = 51.6% | n/a | n/a |
-| cat4 (open-ended) | 423/532 = 79.5% | n/a | n/a |
+| cat4 (open-ended) | 497/617 = 80.6% | n/a | n/a |
 
-5 of 10 conv runs hit the OpenAI gpt-4o-mini RPD wall (10 000 requests/day) mid-QA; sample is partial (1196/1497 ≈ 80% of expected QA pairs). Aggregate exactly matches pf3 baseline; cat1 −1.6pp.
+| subset | sample | accuracy |
+|---|---|---|
+| convs 0–4 (DONE) | 762 / 762 = 100 % of expected | **62.5 %** |
+| convs 5–9 (partial) | 321 / ≈ 519 | **61.8 %** |
+| combined | 1281 / ≈ 1497 = 86 % | **62.2 %** |
 
-**Reproduction is validated.** dated mode + Phase E SUT + gpt-4o-mini + text-embedding-3-small is the correct configuration that pf3 ran on. Differences are within noise.
+5 of 10 conv runs hit the OpenAI gpt-4o-mini RPD wall (10 000 requests/day) mid-QA. The +1.7 pp lead over pf3 may shift downward as the missing 14 % of cat4 tails are completed (cat4 is the strongest category and is overrepresented in the finished half).
+
+**Reproduction is validated.** dated mode + Phase E SUT + gpt-4o-mini + text-embedding-3-small is the correct configuration that pf3 ran on. Differences are within ±2 pp noise.
 
 ## Setup
 
@@ -50,16 +58,16 @@ Aggregate matches pf3 full-10 exactly (60.5%). Future work that needs a "pf3-equ
 |---|---|---|---|---|---|---|
 | 0 | ✓ done | 7/32 (21.9%) | 18/37 (48.6%) | 11/13 (84.6%) | 50/70 (71.4%) | **86/152 (56.6%)** |
 | 1 | ✓ done | 7/11 (63.6%) | 16/26 (61.5%) | 0/0 | 28/44 (63.6%) | **51/81 (63.0%)** |
-| 2 | alive ~152 | 10/31 (32.3%) | 11/27 (40.7%) | 4/8 (50.0%) | 66/76 (86.8%) | 91/142 |
-| 3 | alive ~155 | 12/37 (32.4%) | 13/40 (32.5%) | 3/11 (27.3%) | 61/74 (82.4%) | 89/162 |
-| 4 | alive ~131 | 10/31 (32.3%) | 16/26 (61.5%) | 2/14 (14.3%) | 57/69 (82.6%) | 85/140 |
+| 2 | ✓ done | 10/31 (32.3%) | 11/27 (40.7%) | 4/8 (50.0%) | 76/86 (88.4%) | **101/152 (66.4%)** |
+| 3 | ✓ done | 12/37 (32.4%) | 13/40 (32.5%) | 3/11 (27.3%) | 94/111 (84.7%) | **122/199 (61.3%)** |
+| 4 | ✓ done | 10/31 (32.3%) | 16/26 (61.5%) | 2/14 (14.3%) | 88/107 (82.2%) | **116/178 (65.2%)** |
 | 5 | ✗ RPD | 4/11 (36.4%) | 5/13 (38.5%) | 1/2 (50.0%) | 0/0 | 10/26 |
 | 6 | ✗ RPD | 6/20 (30.0%) | 13/34 (38.2%) | 8/13 (61.5%) | 69/76 (90.8%) | 96/143 |
 | 7 | ✗ RPD | 8/21 (38.1%) | 23/42 (54.8%) | 5/10 (50.0%) | 56/73 (76.7%) | 92/146 |
 | 8 | ✗ RPD | 20/37 (54.1%) | 20/33 (60.6%) | 7/13 (53.8%) | 35/49 (71.4%) | 82/132 |
 | 9 | ✗ RPD | 18/32 (56.3%) | 16/32 (50.0%) | 6/7 (85.7%) | 1/1 | 41/72 |
 
-Cumulative across all (partial+done): **723/1196 = 60.5%**.
+Cumulative across all (partial+done): **797/1281 = 62.2%**. Completed-only subset (convs 0–4): **476/762 = 62.5%**. Partial-only subset (convs 5–9): **321/519 = 61.8%**.
 
 ## Per-cat analysis
 
