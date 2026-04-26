@@ -93,6 +93,7 @@ def _build_kb() -> KnowledgeBase:
 
     embed_url = os.environ.get("AI_KNOT_EMBED_URL", "http://localhost:11434")
     embed_model = os.environ.get("AI_KNOT_EMBED_MODEL", "nomic-embed-text")
+    embed_api_key = os.environ.get("AI_KNOT_EMBED_API_KEY") or os.environ.get("OPENAI_API_KEY")
 
     return KnowledgeBase(
         agent_id=agent_id,
@@ -106,6 +107,7 @@ def _build_kb() -> KnowledgeBase:
         episodic_ttl_hours=episodic_ttl_hours,
         embed_url=embed_url,
         embed_model=embed_model,
+        embed_api_key=embed_api_key,
     )
 
 

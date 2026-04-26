@@ -11,10 +11,11 @@ import { fileURLToPath } from "node:url";
 import type { LanguageModelV1 } from "ai";
 
 import { AiknotAdapter } from "./aiknot.js";
+import type { IngestMode } from "./aiknot.js";
 import { answerQuestion, judgeAnswer } from "./evaluator.js";
 import type { Verdict } from "./evaluator.js";
 import { filterQA, loadDataset } from "./locomo.js";
-import type { LoadOptions } from "./locomo.js";
+import type { LoadOptions, Session } from "./locomo.js";
 
 // ---- Paths ------------------------------------------------------------------
 
@@ -153,12 +154,13 @@ export interface EvaluatorFns {
     convIdx: number,
     command: string,
     env: Record<string, string>,
-    topK: number
+    topK: number,
+    ingestMode: IngestMode
   ) => AiknotAdapterLike;
 }
 
 export interface AiknotAdapterLike {
-  ingest(turns: string[]): Promise<void>;
+  ingest(turns: string[], sessions?: Session[]): Promise<void>;
   recall(question: string): Promise<string>;
   close(): Promise<void>;
 }
@@ -168,11 +170,11 @@ const defaultEvaluatorFns = (
   answerModel: LanguageModelV1,
   command: string
 ): EvaluatorFns => ({
-  answerFn: (_, ctx, q) => answerQuestion(answerModel, ctx, q),
-  judgeFn: (_, question, answer, gold) =>
-    judgeAnswer(judgeModel, question, answer, gold),
-  adapterFactory: (dbPath, convIdx, _cmd, env, topK) =>
-    new AiknotAdapter(dbPath, convIdx, command, env, topK),
+  answerFn: async (_, ctx, q) => (await answerQuestion(answerModel, ctx, q)).text,
+  judgeFn: async (_, question, answer, gold) =>
+    (await judgeAnswer(judgeModel, question, answer, gold)).verdict,
+  adapterFactory: (dbPath, convIdx, _cmd, env, topK, ingestMode) =>
+    new AiknotAdapter(dbPath, convIdx, command, env, topK, ingestMode),
 });
 
 // ---- RunOptions -------------------------------------------------------------
@@ -188,6 +190,8 @@ export interface RunOptions extends LoadOptions {
   topK?: number;
   types?: number[];
   sample?: number;
+  convs?: number[];
+  ingestMode?: IngestMode;
   force?: boolean;
   _evaluatorOverride?: Partial<EvaluatorFns>;
 }
@@ -206,6 +210,7 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
     topK = 5,
     types,
     sample,
+    ingestMode = "raw",
     force,
     _evaluatorOverride,
   } = opts;
@@ -233,10 +238,14 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
     saveCheckpoint(cp);
   }
 
-  const dataset = await loadDataset({
+  let dataset = await loadDataset({
     locomoFile: opts.locomoFile,
     limit: opts.limit,
   });
+  if (opts.convs && opts.convs.length > 0) {
+    const wanted = new Set(opts.convs);
+    dataset = dataset.filter((conv) => wanted.has(conv.idx));
+  }
 
   const fns: EvaluatorFns = {
     ...defaultEvaluatorFns(judgeModel, answerModel, aiKnotCommand),
@@ -272,14 +281,14 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
       continue;
     }
 
-    const adapter = fns.adapterFactory(dbPath(runId), conv.idx, aiKnotCommand, aiKnotEnv, topK);
+    const adapter = fns.adapterFactory(dbPath(runId), conv.idx, aiKnotCommand, aiKnotEnv, topK, ingestMode);
 
     try {
       if (!cp!.ingested.includes(conv.idx)) {
         process.stdout.write(
           `  conv ${convLabel}/${dataset.length} — ingesting ${conv.turns.length} turns… `
         );
-        await adapter.ingest(conv.turns);
+        await adapter.ingest(conv.turns, conv.sessions);
         cp!.ingested.push(conv.idx);
         saveCheckpoint(cp!);
         process.stdout.write("done\n");

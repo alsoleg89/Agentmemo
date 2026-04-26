@@ -1,3 +1,4 @@
+import type { IngestMode } from "./aiknot.js";
 import { loadConfig } from "./config.js";
 import {
   DEFAULT_ANSWER_MODEL,
@@ -16,6 +17,8 @@ export interface RunArgs {
   limit?: number;
   sample?: number;
   types?: number[];
+  convs?: number[];
+  ingestMode?: IngestMode;
   topK: number;
   aiKnotEnv: Record<string, string>;
   force: boolean;
@@ -43,6 +46,8 @@ function parseRunArgs(args: string[]): RunArgs {
   let limit: number | undefined;
   let sample: number | undefined;
   let types: number[] | undefined;
+  let convs: number[] | undefined;
+  let ingestMode: IngestMode | undefined;
   let topK = 5;
   const aiKnotEnv: Record<string, string> = {};
   let force = false;
@@ -69,6 +74,17 @@ function parseRunArgs(args: string[]): RunArgs {
     } else if (a === "--types" && next) {
       types = next.split(",").map((s) => parseInt(s.trim(), 10));
       i++;
+    } else if (a === "--convs" && next) {
+      convs = next.split(",").map((s) => parseInt(s.trim(), 10));
+      i++;
+    } else if (a === "--ingest-mode" && next) {
+      if (next === "raw" || next === "dated" || next === "session") {
+        ingestMode = next;
+      } else {
+        console.error(`Error: --ingest-mode must be raw|dated|session (got "${next}")`);
+        process.exit(1);
+      }
+      i++;
     } else if (a === "--top-k" && next) {
       topK = parseInt(next, 10);
       i++;
@@ -89,7 +105,7 @@ function parseRunArgs(args: string[]): RunArgs {
     process.exit(1);
   }
 
-  return { command: "run", runId, judgeModel, answerModel, limit, sample, types, topK, aiKnotEnv, force };
+  return { command: "run", runId, judgeModel, answerModel, limit, sample, types, convs, ingestMode, topK, aiKnotEnv, force };
 }
 
 function parseListArgs(args: string[]): ListArgs {
@@ -180,6 +196,8 @@ async function main(): Promise<void> {
     limit,
     sample,
     types,
+    convs,
+    ingestMode,
     topK,
     aiKnotEnv,
     force,
@@ -197,6 +215,8 @@ async function main(): Promise<void> {
     limit,
     sample,
     types,
+    convs,
+    ingestMode,
     force,
   });
 }

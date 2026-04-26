@@ -1,4 +1,7 @@
 import { KnowledgeBase } from "ai-knot";
+import type { Session } from "./locomo.js";
+
+export type IngestMode = "raw" | "dated" | "session";
 
 /**
  * Per-conversation adapter around ai-knot KnowledgeBase.
@@ -10,6 +13,7 @@ import { KnowledgeBase } from "ai-knot";
 export class AiknotAdapter {
   private readonly kb: KnowledgeBase;
   private readonly topK: number;
+  private readonly ingestMode: IngestMode;
 
   constructor(
     /** Absolute path to the run-specific SQLite file. */
@@ -22,8 +26,11 @@ export class AiknotAdapter {
     env: Record<string, string> = {},
     /** Number of facts to recall per query. */
     topK = 5,
+    /** How to ingest conversation data. */
+    ingestMode: IngestMode = "raw",
   ) {
     this.topK = topK;
+    this.ingestMode = ingestMode;
     this.kb = new KnowledgeBase({
       agentId: `conv-${convIdx}`,
       storage: "sqlite",
@@ -33,10 +40,48 @@ export class AiknotAdapter {
     });
   }
 
-  /** Ingest all turns of a conversation into the knowledge base. */
-  async ingest(turns: string[]): Promise<void> {
+  /** Ingest conversation data into the knowledge base. */
+  async ingest(turns: string[], sessions?: Session[]): Promise<void> {
+    if (this.ingestMode === "dated" && sessions && sessions.length > 0) {
+      await this.ingestDated(sessions);
+    } else if (this.ingestMode === "session" && sessions && sessions.length > 0) {
+      await this.ingestSessions(sessions);
+    } else {
+      await this.ingestRaw(turns);
+    }
+  }
+
+  /** Raw mode: one fact per turn (original behavior). */
+  private async ingestRaw(turns: string[]): Promise<void> {
     for (const turn of turns) {
       await this.kb.add(turn);
+    }
+  }
+
+  /**
+   * Dated mode: sliding 3-turn window per session, prefixed with `[session.date] `.
+   * Mirrors the pf3-runtime ingest pattern: each turn becomes a fact whose context
+   * is the surrounding 3 turns and whose date prefix lets enrich_date_tags inject
+   * canonical date tags for cat2 (temporal) recall.
+   */
+  private async ingestDated(sessions: Session[]): Promise<void> {
+    const WINDOW = 3;
+    for (const session of sessions) {
+      const prefix = session.date ? `[${session.date}] ` : "";
+      const turns = session.turns;
+      for (let i = 0; i < turns.length; i++) {
+        const start = Math.max(0, i - Math.floor(WINDOW / 2));
+        const end = Math.min(turns.length, start + WINDOW);
+        const window = turns.slice(start, end).join(" / ");
+        await this.kb.add(`${prefix}${window}`);
+      }
+    }
+  }
+
+  /** Session mode: one fact per session (date-prefixed full text). */
+  private async ingestSessions(sessions: Session[]): Promise<void> {
+    for (const session of sessions) {
+      await this.kb.add(session.text);
     }
   }
 
