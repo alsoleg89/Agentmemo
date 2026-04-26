@@ -120,11 +120,23 @@ def tool_recall_with_trace(kb: KnowledgeBase, query: str, *, top_k: int = 5) -> 
         JSON object with ``{"context", "pack_fact_ids", "trace"}``; trace keys:
         stage1_candidates (from_bm25/from_rare_tokens/from_entity_hop), stage3_rrf,
         stage3b_dense_guarantee, stage4a_ddsa, stage4b_mmr.
+        When AI_KNOT_PACK_V2=1, pack_fact_ids reflects Pack V2 reorder + budget.
         Intended for diagnostics only — not for production use.
     """
+    from ai_knot._query_intent import classify_recall_intent
+    from ai_knot.pack import PACK_V2_ENABLED, EvidencePackBuilder
+
     pairs, trace = kb.recall_facts_with_trace(query, top_k=top_k)
-    context = kb.recall(query, top_k=top_k)
-    pack_fact_ids = [f.id for f, _ in pairs]
+
+    if PACK_V2_ENABLED:
+        intent = classify_recall_intent(query)
+        pack = EvidencePackBuilder().build(pairs, intent=intent.value)
+        context = pack.render()
+        pack_fact_ids = pack.fact_ids
+    else:
+        context = kb.recall(query, top_k=top_k)
+        pack_fact_ids = [f.id for f, _ in pairs]
+
     return json.dumps(
         {"context": context, "pack_fact_ids": pack_fact_ids, "trace": trace},
         ensure_ascii=False,

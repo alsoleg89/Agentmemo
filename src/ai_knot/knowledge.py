@@ -1065,6 +1065,13 @@ class KnowledgeBase(_LearningMixin):
         )
         if not pairs:
             return ""
+
+        from ai_knot.pack import PACK_V2_ENABLED, EvidencePackBuilder
+
+        if PACK_V2_ENABLED:
+            intent = classify_recall_intent(query)
+            return EvidencePackBuilder().build(pairs, intent=intent.value).render()
+
         config = get_pipeline_config(classify_recall_intent(query))
         if config.sort_strategy == "sandwich":
             pairs = self._sandwich_reorder(pairs)
