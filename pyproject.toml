@@ -63,6 +63,7 @@ markers = [
     "integration: tests that touch storage or multiple layers",
     "slow: tests that are intentionally slow (benchmarks, large data)",
     "requires_api_key: tests that call real LLM APIs (skipped in CI)",
+    "real_embedder: opt out of the deterministic-embedder stub in conftest",
     "benchmark: comparative backend benchmark suite (requires Ollama for full run)",
 ]
 
