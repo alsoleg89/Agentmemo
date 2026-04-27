@@ -14,7 +14,8 @@ import type { LanguageModelV1 } from "ai";
 import { AiknotAdapter } from "./aiknot.js";
 import type { IngestMode } from "./aiknot.js";
 import { answerQuestion, judgeAnswer } from "./evaluator.js";
-import type { Verdict } from "./evaluator.js";
+import type { ReaderMode, Verdict } from "./evaluator.js";
+import { answerWithExtraction } from "./reader_extraction.js";
 import { filterQA, loadDataset } from "./locomo.js";
 import type { LoadOptions, Session } from "./locomo.js";
 
@@ -191,9 +192,15 @@ export interface AiknotAdapterLike {
 const defaultEvaluatorFns = (
   judgeModel: LanguageModelV1,
   answerModel: LanguageModelV1,
-  command: string
+  command: string,
+  readerMode: ReaderMode = "single"
 ): EvaluatorFns => ({
-  answerFn: async (_, ctx, q) => (await answerQuestion(answerModel, ctx, q)).text,
+  answerFn: async (_, ctx, q) => {
+    if (readerMode === "extraction") {
+      return (await answerWithExtraction(answerModel, ctx, q)).text;
+    }
+    return (await answerQuestion(answerModel, ctx, q)).text;
+  },
   judgeFn: async (_, question, answer, gold) =>
     (await judgeAnswer(judgeModel, question, answer, gold)).verdict,
   adapterFactory: (dbPath, convIdx, _cmd, env, topK, ingestMode) =>
@@ -215,6 +222,7 @@ export interface RunOptions extends LoadOptions {
   sample?: number;
   convs?: number[];
   ingestMode?: IngestMode;
+  readerMode?: ReaderMode;
   force?: boolean;
   _evaluatorOverride?: Partial<EvaluatorFns>;
 }
@@ -234,6 +242,7 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
     types,
     sample,
     ingestMode = "raw",
+    readerMode = "single",
     force,
     _evaluatorOverride,
   } = opts;
@@ -271,7 +280,7 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
   }
 
   const fns: EvaluatorFns = {
-    ...defaultEvaluatorFns(judgeModel, answerModel, aiKnotCommand),
+    ...defaultEvaluatorFns(judgeModel, answerModel, aiKnotCommand, readerMode),
     ..._evaluatorOverride,
   };
 

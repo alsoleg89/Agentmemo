@@ -1,7 +1,7 @@
 import { KnowledgeBase } from "ai-knot";
 import type { Session } from "./locomo.js";
 
-export type IngestMode = "raw" | "dated" | "session";
+export type IngestMode = "raw" | "dated" | "session" | "observed-dated";
 
 /**
  * Per-conversation adapter around ai-knot KnowledgeBase.
@@ -42,7 +42,9 @@ export class AiknotAdapter {
 
   /** Ingest conversation data into the knowledge base. */
   async ingest(turns: string[], sessions?: Session[]): Promise<void> {
-    if (this.ingestMode === "dated" && sessions && sessions.length > 0) {
+    if (this.ingestMode === "observed-dated" && sessions && sessions.length > 0) {
+      await this.ingestObservedDated(sessions);
+    } else if (this.ingestMode === "dated" && sessions && sessions.length > 0) {
       await this.ingestDated(sessions);
     } else if (this.ingestMode === "session" && sessions && sessions.length > 0) {
       await this.ingestSessions(sessions);
@@ -74,6 +76,36 @@ export class AiknotAdapter {
         const end = Math.min(turns.length, start + WINDOW);
         const window = turns.slice(start, end).join(" / ");
         await this.kb.add(`${prefix}${window}`);
+      }
+    }
+  }
+
+  /**
+   * Observed-dated mode: the dated 3-turn window baseline plus LoCoMo's
+   * documented non-dialogue memory surfaces:
+   *   - image metadata (`blip_caption`, image search `query`)
+   *   - generated per-speaker observations
+   *   - generated session summaries
+   *
+   * Event summaries are intentionally excluded here; they are diagnostic/gold
+   * annotations for the event-summarization task, not a QA memory source.
+   */
+  private async ingestObservedDated(sessions: Session[]): Promise<void> {
+    await this.ingestDated(sessions);
+
+    for (const session of sessions) {
+      const bySource = new Map<string, string[]>();
+      for (const fact of session.observedFacts ?? []) {
+        const source = /\[source=([^\]\s]+)/.exec(fact)?.[1] ?? "observed";
+        const group = bySource.get(source) ?? [];
+        group.push(fact);
+        bySource.set(source, group);
+      }
+
+      for (const [source, facts] of bySource) {
+        await this.kb.add(
+          `[source=${source}_bundle session=${session.key}] ` + facts.join("\n")
+        );
       }
     }
   }
