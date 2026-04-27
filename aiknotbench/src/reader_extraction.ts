@@ -36,8 +36,7 @@ const EXTRACT_SYSTEM =
 const COMPOSE_SYSTEM =
   `Compose a concise answer using only the provided facts. Answer directly without preamble.`;
 
-// Questions that start with these patterns are single-answer (temporal/causal/manner)
-// and must fall back to single-pass even in extraction mode.
+// Single-answer questions (temporal, causal, manner, yes/no)
 const SINGLE_RE =
   /^(?:when\b|why\b|how\s+did\b|how\s+was\b|how\s+has\b|how\s+have\b|how\s+long\b|how\s+old\b|how\s+much\b|who\s+is\b|who\s+was\b|who\s+did\b|did\b|was\b|were\b|is\b|are\s+you\b|do\s+you\b|which\b)/i;
 
@@ -48,16 +47,14 @@ const ENUM_OPENER_RE = /^(?:how\s+many\b|list\b|name\s+all\b|what\s+are\b|what\s
 const ENUM_NOUN_RE =
   /\b(?:hobbies|interests|activities|events|subjects|objects|books|pets|animals|sports|names|types|kinds|things|places|goals|plans|reasons|favorites|examples|languages|members|friends)\b/i;
 
-/**
- * Returns true when a question is likely asking for an enumeration (list, count,
- * or profile-slot) answer, where the extraction reader adds value.
- * Conservative: defaults to false (single-pass) when uncertain.
- */
+const WHAT_RE = /^what\b/i;
+
+/** Returns true for questions that benefit from list/enumeration extraction. */
 export function isEnumerationQuestion(question: string): boolean {
   const q = question.trim();
   if (SINGLE_RE.test(q)) return false;
   if (ENUM_OPENER_RE.test(q)) return true;
-  if (/^what\b/i.test(q) && ENUM_NOUN_RE.test(q)) return true;
+  if (WHAT_RE.test(q) && ENUM_NOUN_RE.test(q)) return true;
   return false;
 }
 
