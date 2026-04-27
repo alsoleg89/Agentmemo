@@ -26,6 +26,12 @@ class TestCreateStorage:
         with pytest.raises(ValueError, match="Unknown storage backend"):
             create_storage("redis")
 
+    def test_sqlite_dsn_overrides_base_dir(self, tmp_path: Path) -> None:
+        explicit = str(tmp_path / "custom.db")
+        storage = create_storage("sqlite", dsn=explicit)
+        assert isinstance(storage, SQLiteStorage)
+        assert storage._db_path == explicit
+
     def test_postgres_without_dsn_raises(self) -> None:
         with pytest.raises(ValueError, match="DSN"):
             create_storage("postgres")
