@@ -22,6 +22,13 @@ class TestCreateStorage:
         storage = create_storage("sqlite", base_dir=str(tmp_path))
         assert isinstance(storage, SQLiteStorage)
 
+    def test_sqlite_dsn_overrides_base_dir(self, tmp_path: Path) -> None:
+        # AI_KNOT_DB_PATH must land in the run-specific file, not base_dir/ai_knot.db
+        custom_db = str(tmp_path / "custom.db")
+        storage = create_storage("sqlite", base_dir=str(tmp_path / "ignored"), dsn=custom_db)
+        assert isinstance(storage, SQLiteStorage)
+        assert storage._db_path == custom_db  # type: ignore[attr-defined]
+
     def test_unknown_backend_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown storage backend"):
             create_storage("redis")
