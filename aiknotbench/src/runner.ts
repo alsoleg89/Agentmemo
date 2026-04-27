@@ -15,7 +15,7 @@ import { AiknotAdapter } from "./aiknot.js";
 import type { IngestMode } from "./aiknot.js";
 import { answerQuestion, judgeAnswer } from "./evaluator.js";
 import type { ReaderMode, Verdict } from "./evaluator.js";
-import { answerWithExtraction } from "./reader_extraction.js";
+import { answerWithExtraction, isEnumerationQuestion } from "./reader_extraction.js";
 import { filterQA, loadDataset } from "./locomo.js";
 import type { LoadOptions, Session } from "./locomo.js";
 
@@ -196,7 +196,7 @@ const defaultEvaluatorFns = (
   readerMode: ReaderMode = "single"
 ): EvaluatorFns => ({
   answerFn: async (_, ctx, q) => {
-    if (readerMode === "extraction") {
+    if (readerMode === "extraction" && isEnumerationQuestion(q)) {
       return (await answerWithExtraction(answerModel, ctx, q)).text;
     }
     return (await answerQuestion(answerModel, ctx, q)).text;

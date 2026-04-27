@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dedupCandidates } from "../src/reader_extraction.js";
+import { dedupCandidates, isEnumerationQuestion } from "../src/reader_extraction.js";
 
 describe("dedupCandidates", () => {
   it("removes case-duplicates, first occurrence wins", () => {
@@ -33,5 +33,35 @@ describe("dedupCandidates", () => {
 
   it("returns empty array for all-blank input", () => {
     expect(dedupCandidates(["", " ", "\t"])).toEqual([]);
+  });
+});
+
+describe("isEnumerationQuestion", () => {
+  it("accepts list-noun questions", () => {
+    expect(isEnumerationQuestion("What hobbies does Melanie have?")).toBe(true);
+    expect(isEnumerationQuestion("What activities does Melanie do on family hikes?")).toBe(true);
+    expect(isEnumerationQuestion("What are the names of Melanie's pets?")).toBe(true);
+    expect(isEnumerationQuestion("What events has Caroline participated in?")).toBe(true);
+    expect(isEnumerationQuestion("What subjects does Melanie paint?")).toBe(true);
+  });
+
+  it("accepts how-many and list/name imperatives", () => {
+    expect(isEnumerationQuestion("How many books has Caroline read?")).toBe(true);
+    expect(isEnumerationQuestion("List all activities Melanie enjoys.")).toBe(true);
+    expect(isEnumerationQuestion("What are Caroline's interests?")).toBe(true);
+  });
+
+  it("rejects temporal and causal questions", () => {
+    expect(isEnumerationQuestion("When did Caroline go to the support group?")).toBe(false);
+    expect(isEnumerationQuestion("How did Melanie feel after the accident?")).toBe(false);
+    expect(isEnumerationQuestion("Why did Caroline start volunteering?")).toBe(false);
+    expect(isEnumerationQuestion("Who was Melanie's mentor?")).toBe(false);
+    expect(isEnumerationQuestion("Did Caroline attend the pride parade?")).toBe(false);
+    expect(isEnumerationQuestion("Was Melanie happy about the adoption?")).toBe(false);
+  });
+
+  it("rejects single-answer what-questions", () => {
+    expect(isEnumerationQuestion("What type of adoption was Caroline researching?")).toBe(false);
+    expect(isEnumerationQuestion("What does Melanie do to destress?")).toBe(false);
   });
 });
