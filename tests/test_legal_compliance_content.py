@@ -30,6 +30,9 @@ SKIP_DIR_NAMES = {
     ".ai_knot_v2",
     ".claude",
     "data",
+    # Research scripts and their JSON outputs contain third-party benchmark data
+    # (LOCOMO) with proper nouns and demographic terms that are not source-code content.
+    "research",
 }
 SKIP_FILE_NAMES = {"compliance_allowlist.txt", "test_legal_compliance_content.py"}
 TEXT_EXTENSIONS = {".py", ".md", ".txt", ".json", ".yaml", ".yml"}

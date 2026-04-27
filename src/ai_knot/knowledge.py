@@ -17,6 +17,10 @@ from ai_knot._date_enrichment import enrich_date_tags
 from ai_knot._inverted_index import InvertedIndex, _char_trigrams, _slot_exact_score
 from ai_knot._query_intent import classify_recall_intent, get_pipeline_config
 from ai_knot._spreading_activation import spreading_activation
+from ai_knot._temporal import (
+    is_temporal_query,
+    resolve_fact_line,
+)
 from ai_knot.extractor import Extractor as Extractor  # noqa: F401  re-exported for tests
 from ai_knot.extractor import split_enumerations
 from ai_knot.forgetting import apply_decay
@@ -1081,6 +1085,8 @@ class KnowledgeBase(_LearningMixin):
             if text not in seen:
                 seen.add(text)
                 lines.append(f"[{len(lines) + 1}] {text}")
+        if os.environ.get("AI_KNOT_TEMPORAL_ANCHOR") == "1" and is_temporal_query(query):
+            lines = [resolve_fact_line(line) for line in lines]
         return "\n".join(lines)
 
     def list_facts(self) -> list[Fact]:
