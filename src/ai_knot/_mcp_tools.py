@@ -122,9 +122,7 @@ def tool_recall_with_trace(kb: KnowledgeBase, query: str, *, top_k: int = 5) -> 
         stage3b_dense_guarantee, stage4a_ddsa, stage4b_mmr.
         Intended for diagnostics only — not for production use.
     """
-    pairs, trace = kb.recall_facts_with_trace(query, top_k=top_k)
-    context = kb.recall(query, top_k=top_k)
-    pack_fact_ids = [f.id for f, _ in pairs]
+    context, pack_fact_ids, trace = kb.recall_with_trace(query, top_k=top_k)
     return json.dumps(
         {"context": context, "pack_fact_ids": pack_fact_ids, "trace": trace},
         ensure_ascii=False,

@@ -132,6 +132,29 @@ def _detect_facets(text: str) -> list[str]:
     return sorted(found)
 
 
+def extract_entity_fields(content: str) -> tuple[str, str, str, str] | None:
+    """Extract (entity, attribute, value_text, slot_key) from dated/observation content.
+
+    Returns None when content doesn't match the dated or observation format,
+    contains multi-speaker patterns, or has no detectable facets.
+    Called from KnowledgeBase.add() to populate structured fields so that
+    Channel C entity-hop and slot-exact retrieval work on raw/dated facts.
+    """
+    content = content.strip()
+    m = _OBS_RE.match(content) or _DATED_RE.match(content)
+    if not m:
+        return None
+    speaker = m.group(1)
+    statement = m.group(2).strip()
+    if _MULTI_SPEAKER_RE.search(statement):
+        return None
+    facets = _detect_facets(statement)
+    if not facets:
+        return None
+    primary_facet = facets[0]
+    return speaker, primary_facet, statement[:200], f"{speaker}::{primary_facet}"
+
+
 @dataclass(frozen=True)
 class ProfileRow:
     """One cited row returned by ProfileIndex.lookup()."""

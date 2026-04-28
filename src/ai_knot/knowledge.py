@@ -16,7 +16,7 @@ from ai_knot._bm25 import _rrf_fuse
 from ai_knot._date_enrichment import enrich_date_tags
 from ai_knot._inverted_index import InvertedIndex, _char_trigrams, _slot_exact_score
 from ai_knot._k1_router import classify_k1
-from ai_knot._profile_index import ProfileIndex
+from ai_knot._profile_index import ProfileIndex, extract_entity_fields
 from ai_knot._query_intent import classify_recall_intent, get_pipeline_config
 from ai_knot._spreading_activation import spreading_activation
 from ai_knot.extractor import Extractor as Extractor  # noqa: F401  re-exported for tests
@@ -189,6 +189,11 @@ class KnowledgeBase(_LearningMixin):
         )
         # C6c: inject canonical date tags for temporal recall (mode-agnostic).
         enrich_date_tags(fact)
+        # F1: populate structured fields from dated/observation content so that
+        # Channel C entity-hop and slot-exact retrieval work on raw-ingested facts.
+        _ef = extract_entity_fields(content)
+        if _ef is not None:
+            fact.entity, fact.attribute, fact.value_text, fact.slot_key = _ef
         if self._profile_index is not None:
             self._profile_index.index_fact(fact)
 
@@ -666,6 +671,23 @@ class KnowledgeBase(_LearningMixin):
             else None
         )
 
+        # Channel E: entity-direct lookup — when K1Router detects a named entity
+        # in the query, guarantee all entity-indexed facts for that entity enter
+        # the candidate pool regardless of BM25 score.
+        # Requires F1 structured fields populated; no-op in windowed mode.
+        _trace_ch_e: set[str] | None = None
+        if _K1_ROUTER_ENABLED:
+            k1_q = classify_k1(query)
+            if k1_q is not None:
+                ent_lower = k1_q.entity.lower()
+                _before_e = set(candidate_ids) if trace is not None else None
+                for ent_key, ent_facts in entity_index.items():
+                    if ent_lower in ent_key or ent_key in ent_lower:
+                        for ef in ent_facts:
+                            candidate_ids.add(ef.id)
+                if trace is not None and _before_e is not None:
+                    _trace_ch_e = candidate_ids - _before_e
+
         # Channel D: dense retrieval (no-op when embeddings unavailable).
         # Track dense scores so the top-1 semantic match can be guaranteed
         # even when it has zero BM25 (vocabulary gap / terminology mismatch).
@@ -678,11 +700,17 @@ class KnowledgeBase(_LearningMixin):
                 candidate_ids.add(f.id)
 
         if trace is not None:
-            _prev = (_trace_ch_a or set()) | (_trace_ch_b or set()) | (_trace_ch_c or set())
+            _prev = (
+                (_trace_ch_a or set())
+                | (_trace_ch_b or set())
+                | (_trace_ch_c or set())
+                | (_trace_ch_e or set())
+            )
             trace["stage1_candidates"] = {
                 "from_bm25": sorted(_trace_ch_a or set()),
                 "from_rare_tokens": sorted(_trace_ch_b or set()),
                 "from_entity_hop": sorted(_trace_ch_c or set()),
+                "from_entity_direct": sorted(_trace_ch_e or set()),
                 "from_dense": sorted(candidate_ids - _prev),
                 "total": len(candidate_ids),
                 "dense_scores": dict(dense_scores),
@@ -1050,6 +1078,48 @@ class KnowledgeBase(_LearningMixin):
         middle = pairs[5:]
         return top1 + middle + tail
 
+    def _render_context(
+        self,
+        query: str,
+        pairs: list[tuple[Fact, float]],
+    ) -> str:
+        """Render (Fact, score) pairs into the formatted context string for prompt injection.
+
+        Applies sort_strategy, K1 profile injection, and entity-attribute prefix.
+        Shared by recall() and recall_with_trace() to avoid double retrieval.
+        """
+        if not pairs:
+            return ""
+        config = get_pipeline_config(classify_recall_intent(query))
+        if config.sort_strategy == "sandwich":
+            pairs = self._sandwich_reorder(pairs)
+        elif config.sort_strategy == "chronological":
+            head = list(pairs[:15])
+            head.sort(key=lambda x: x[0].created_at)
+            pairs = head + list(pairs[15:])
+        seen: set[str] = set()
+        lines: list[str] = []
+        if _K1_ROUTER_ENABLED and self._profile_index is not None:
+            k1 = classify_k1(query)
+            if k1 is not None:
+                profile_rows = self._profile_index.lookup(k1.entity, k1.facets)
+                for row in profile_rows:
+                    snippet = (
+                        f"[profile fact={row.fact_id}]"
+                        f" {row.entity} — {row.facet}: {row.value_snippet}"
+                    )
+                    if snippet not in seen:
+                        seen.add(snippet)
+                        lines.append(f"[{len(lines) + 1}] {snippet}")
+        for f, _ in pairs:
+            text = f.prompt_surface or f.source_verbatim or f.content
+            if f.entity and f.attribute:
+                text = f"[{f.entity}: {f.attribute}={f.value_text}] {text}"
+            if text not in seen:
+                seen.add(text)
+                lines.append(f"[{len(lines) + 1}] {text}")
+        return "\n".join(lines)
+
     def recall(
         self,
         query: str,
@@ -1072,41 +1142,39 @@ class KnowledgeBase(_LearningMixin):
         pairs = self._execute_recall(
             query, top_k=top_k, now=now, include_unsupported=include_unsupported
         )
-        if not pairs:
-            return ""
-        config = get_pipeline_config(classify_recall_intent(query))
-        if config.sort_strategy == "sandwich":
-            pairs = self._sandwich_reorder(pairs)
-        elif config.sort_strategy == "chronological":
-            head = list(pairs[:15])
-            head.sort(key=lambda x: x[0].created_at)
-            pairs = head + list(pairs[15:])
-        seen: set[str] = set()
-        lines: list[str] = []
-        # K1 profile injection: prepend cited ProfileIndex rows as front matter
-        # when AI_KNOT_PROFILE_INDEX=1 and AI_KNOT_K1_ROUTER=1 are both set.
-        # B3: profile rows are injected regardless of BM25 overlap so that
-        # profile-matched facts are never demoted by the LITM skip guard.
-        if _K1_ROUTER_ENABLED and self._profile_index is not None:
-            k1 = classify_k1(query)
-            if k1 is not None:
-                profile_rows = self._profile_index.lookup(k1.entity, k1.facets)
-                for row in profile_rows:
-                    snippet = (
-                        f"[profile fact={row.fact_id}]"
-                        f" {row.entity} — {row.facet}: {row.value_snippet}"
-                    )
-                    if snippet not in seen:
-                        seen.add(snippet)
-                        lines.append(f"[{len(lines) + 1}] {snippet}")
-        for f, _ in pairs:
-            text = f.prompt_surface or f.source_verbatim or f.content
-            if f.entity and f.attribute:
-                text = f"[{f.entity}: {f.attribute}={f.value_text}] {text}"
-            if text not in seen:
-                seen.add(text)
-                lines.append(f"[{len(lines) + 1}] {text}")
-        return "\n".join(lines)
+        return self._render_context(query, pairs)
+
+    def recall_with_trace(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        now: datetime | None = None,
+        include_unsupported: bool = False,
+    ) -> tuple[str, list[str], dict[str, Any]]:
+        """Diagnostic variant of recall — single-pass, returns (context, pack_fact_ids, trace).
+
+        Args:
+            query: What the agent needs to know right now.
+            top_k: Maximum number of facts to return.
+            now: Point-in-time for decay calculation (default: current UTC).
+            include_unsupported: Include facts with ``supported=False`` (default: False).
+
+        Returns:
+            Tuple of (formatted_context, fact_id_list, stage_trace_dict).
+            Intended for diagnostics only — not for production use.
+        """
+        trace: dict[str, Any] = {}
+        pairs = self._execute_recall(
+            query,
+            top_k=top_k,
+            now=now,
+            include_unsupported=include_unsupported,
+            trace=trace,
+        )
+        context = self._render_context(query, pairs)
+        pack_fact_ids = [f.id for f, _ in pairs]
+        return context, pack_fact_ids, trace
 
     def list_facts(self) -> list[Fact]:
         """Return all stored facts for this agent.
