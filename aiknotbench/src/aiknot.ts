@@ -1,7 +1,7 @@
 import { KnowledgeBase } from "ai-knot";
 import type { Session } from "./locomo.js";
 
-export type IngestMode = "raw" | "dated" | "session";
+export type IngestMode = "raw" | "dated" | "session" | "windowed";
 
 /**
  * Per-conversation adapter around ai-knot KnowledgeBase.
@@ -44,6 +44,8 @@ export class AiknotAdapter {
   async ingest(turns: string[], sessions?: Session[]): Promise<void> {
     if (this.ingestMode === "dated" && sessions && sessions.length > 0) {
       await this.ingestDated(sessions);
+    } else if (this.ingestMode === "windowed" && sessions && sessions.length > 0) {
+      await this.ingestWindowed(sessions);
     } else if (this.ingestMode === "session" && sessions && sessions.length > 0) {
       await this.ingestSessions(sessions);
     } else {
@@ -68,6 +70,25 @@ export class AiknotAdapter {
       const prefix = session.date ? `[${session.date}] ` : "";
       for (const turn of session.turns) {
         await this.kb.add(`${prefix}${turn}`);
+      }
+    }
+  }
+
+  /**
+   * Windowed mode: 3-turn sliding window with date prefix (pre-Stage-A behavior).
+   * Preserves retrieval token density at the cost of multi-speaker attribution.
+   * Use with top_k=60 to match the historical baseline configuration.
+   */
+  private async ingestWindowed(sessions: Session[]): Promise<void> {
+    const WINDOW = 3;
+    for (const session of sessions) {
+      const prefix = session.date ? `[${session.date}] ` : "";
+      const turns = session.turns;
+      for (let i = 0; i < turns.length; i++) {
+        const start = Math.max(0, i - Math.floor(WINDOW / 2));
+        const end = Math.min(turns.length, start + WINDOW);
+        const window = turns.slice(start, end).join(" / ");
+        await this.kb.add(`${prefix}${window}`);
       }
     }
   }
