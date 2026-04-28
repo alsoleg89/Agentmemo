@@ -671,22 +671,7 @@ class KnowledgeBase(_LearningMixin):
             else None
         )
 
-        # Channel E: entity-direct lookup — when K1Router detects a named entity
-        # in the query, guarantee all entity-indexed facts for that entity enter
-        # the candidate pool regardless of BM25 score.
-        # Requires F1 structured fields populated; no-op in windowed mode.
         _trace_ch_e: set[str] | None = None
-        if _K1_ROUTER_ENABLED:
-            k1_q = classify_k1(query)
-            if k1_q is not None:
-                ent_lower = k1_q.entity.lower()
-                _before_e = set(candidate_ids) if trace is not None else None
-                for ent_key, ent_facts in entity_index.items():
-                    if ent_lower in ent_key or ent_key in ent_lower:
-                        for ef in ent_facts:
-                            candidate_ids.add(ef.id)
-                if trace is not None and _before_e is not None:
-                    _trace_ch_e = candidate_ids - _before_e
 
         # Channel D: dense retrieval (no-op when embeddings unavailable).
         # Track dense scores so the top-1 semantic match can be guaranteed
