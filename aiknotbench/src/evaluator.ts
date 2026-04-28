@@ -3,6 +3,8 @@ import type { LanguageModelV1 } from "ai";
 
 export type Verdict = "CORRECT" | "WRONG";
 
+export type ReaderMode = "single" | "extraction";
+
 // Strip null bytes and other control characters that break JSON serialization
 function sanitize(s: string): string {
   // eslint-disable-next-line no-control-regex

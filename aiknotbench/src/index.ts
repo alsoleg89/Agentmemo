@@ -1,4 +1,5 @@
 import type { IngestMode } from "./aiknot.js";
+import type { ReaderMode } from "./evaluator.js";
 import { loadConfig } from "./config.js";
 import {
   DEFAULT_ANSWER_MODEL,
@@ -19,6 +20,7 @@ export interface RunArgs {
   types?: number[];
   convs?: number[];
   ingestMode?: IngestMode;
+  readerMode: ReaderMode;
   topK: number;
   aiKnotEnv: Record<string, string>;
   force: boolean;
@@ -48,6 +50,7 @@ function parseRunArgs(args: string[]): RunArgs {
   let types: number[] | undefined;
   let convs: number[] | undefined;
   let ingestMode: IngestMode | undefined;
+  let readerMode: ReaderMode = "single";
   let topK = 5;
   const aiKnotEnv: Record<string, string> = {};
   let force = false;
@@ -78,10 +81,18 @@ function parseRunArgs(args: string[]): RunArgs {
       convs = next.split(",").map((s) => parseInt(s.trim(), 10));
       i++;
     } else if (a === "--ingest-mode" && next) {
-      if (next === "raw" || next === "dated" || next === "session") {
+      if (next === "raw" || next === "dated" || next === "session" || next === "observed-dated") {
         ingestMode = next;
       } else {
-        console.error(`Error: --ingest-mode must be raw|dated|session (got "${next}")`);
+        console.error(`Error: --ingest-mode must be raw|dated|session|observed-dated (got "${next}")`);
+        process.exit(1);
+      }
+      i++;
+    } else if (a === "--reader" && next) {
+      if (next === "single" || next === "extraction") {
+        readerMode = next;
+      } else {
+        console.error(`Error: --reader must be single|extraction (got "${next}")`);
         process.exit(1);
       }
       i++;
@@ -105,7 +116,7 @@ function parseRunArgs(args: string[]): RunArgs {
     process.exit(1);
   }
 
-  return { command: "run", runId, judgeModel, answerModel, limit, sample, types, convs, ingestMode, topK, aiKnotEnv, force };
+  return { command: "run", runId, judgeModel, answerModel, limit, sample, types, convs, ingestMode, readerMode, topK, aiKnotEnv, force };
 }
 
 function parseListArgs(args: string[]): ListArgs {
@@ -142,6 +153,8 @@ Run options:
   --sample <n>         Max QA pairs per conversation
   --types <1,2,3,4>    Question categories to evaluate (default: all)
   --top-k <n>          Facts to recall per query (default: 5)
+  --ingest-mode <m>    raw|dated|session|observed-dated (default: raw)
+  --reader <m>         single|extraction reader pipeline (default: single)
   --knot-env K=V       Pass env var to ai-knot-mcp (repeatable)
   --force              Delete existing run data and start fresh
 
@@ -198,6 +211,7 @@ async function main(): Promise<void> {
     types,
     convs,
     ingestMode,
+    readerMode,
     topK,
     aiKnotEnv,
     force,
@@ -217,6 +231,7 @@ async function main(): Promise<void> {
     types,
     convs,
     ingestMode,
+    readerMode,
     force,
   });
 }
