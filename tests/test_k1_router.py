@@ -35,8 +35,17 @@ class TestClassifyK1:
         assert classify_k1("Did Jon mention his hobbies?") is None
 
     def test_no_entity_returns_none(self) -> None:
-        # No capitalized person name
         assert classify_k1("What are the most common hobbies?") is None
+
+    def test_no_facet_returns_none(self) -> None:
+        # Entity present but no facet noun detected → bypass to avoid polluting context
+        assert classify_k1("What did Caroline say at the meeting?") is None
+
+    def test_what_did_temporal_returns_none(self) -> None:
+        assert classify_k1("What did Melanie do at the beach?") is None
+
+    def test_what_was_returns_none(self) -> None:
+        assert classify_k1("What was Caroline's reaction to the news?") is None
 
     def test_what_are_opener_with_entity(self) -> None:
         result = classify_k1("What are Alice's interests?")

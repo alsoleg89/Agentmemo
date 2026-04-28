@@ -140,11 +140,14 @@ _FACET_STEMS: dict[str, str] = {
     "communit": "community",
 }
 
-# Single-answer question openers — bypass K1 routing entirely
+# Single-answer question openers — bypass K1 routing entirely.
+# Includes "what did/was/were" because those signal temporal/event questions
+# even though they start with "what".
 _SINGLE_RE = re.compile(
     r"^(?:when\b|why\b|how\s+did\b|how\s+was\b|how\s+has\b|how\s+have\b|"
     r"how\s+long\b|how\s+old\b|how\s+much\b|who\s+is\b|who\s+was\b|who\s+did\b|"
-    r"did\b|was\b|were\b|is\b|are\s+you\b|do\s+you\b|which\b)",
+    r"did\b|was\b|were\b|is\b|are\s+you\b|do\s+you\b|which\b|"
+    r"what\s+did\b|what\s+was\b|what\s+were\b|what\s+happened\b|what\s+made\b)",
     re.IGNORECASE,
 )
 
@@ -200,4 +203,8 @@ def classify_k1(question: str) -> K1Query | None:
     if not entity:
         return None
 
-    return K1Query(entity=entity, facets=_extract_facets(q))
+    facets = _extract_facets(q)
+    if not facets:
+        return None
+
+    return K1Query(entity=entity, facets=facets)
