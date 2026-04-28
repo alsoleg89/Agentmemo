@@ -310,7 +310,9 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
     try {
       if (!cp!.ingested.includes(conv.idx)) {
         const runDb = dbPath(runId);
-        if (existsSync(runDb) && statSync(runDb).size > 0) {
+        // Guard only fires on the first ingest of a run: DB must be empty then.
+        // Subsequent convs legitimately share the same DB.
+        if (cp!.ingested.length === 0 && existsSync(runDb) && statSync(runDb).size > 0) {
           throw new Error(
             `[preflight] Non-empty DB already exists at ${runDb}. ` +
               `Use --force to delete the run and start fresh.`
