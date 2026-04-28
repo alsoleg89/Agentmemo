@@ -59,21 +59,15 @@ export class AiknotAdapter {
   }
 
   /**
-   * Dated mode: sliding 3-turn window per session, prefixed with `[session.date] `.
-   * Mirrors the pf3-runtime ingest pattern: each turn becomes a fact whose context
-   * is the surrounding 3 turns and whose date prefix lets enrich_date_tags inject
-   * canonical date tags for cat2 (temporal) recall.
+   * Dated mode: one fact per speaker-turn, prefixed with `[session.date] `.
+   * Each fact contains a single speaker's turn so that speaker attribution is
+   * unambiguous for downstream profile/entity routing.
    */
   private async ingestDated(sessions: Session[]): Promise<void> {
-    const WINDOW = 3;
     for (const session of sessions) {
       const prefix = session.date ? `[${session.date}] ` : "";
-      const turns = session.turns;
-      for (let i = 0; i < turns.length; i++) {
-        const start = Math.max(0, i - Math.floor(WINDOW / 2));
-        const end = Math.min(turns.length, start + WINDOW);
-        const window = turns.slice(start, end).join(" / ");
-        await this.kb.add(`${prefix}${window}`);
+      for (const turn of session.turns) {
+        await this.kb.add(`${prefix}${turn}`);
       }
     }
   }
