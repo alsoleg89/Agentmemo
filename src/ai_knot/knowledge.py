@@ -13,6 +13,7 @@ from typing import Any
 
 import ai_knot._spreading_activation as _ddsa
 from ai_knot._bm25 import _rrf_fuse
+from ai_knot._canonical_enrichment import enrich_canonical_surface
 from ai_knot._date_enrichment import enrich_date_tags
 from ai_knot._inverted_index import InvertedIndex, _char_trigrams, _slot_exact_score
 from ai_knot._k1_router import classify_k1
@@ -45,6 +46,7 @@ _LLM_EXPANSION_WEIGHT: float = 0.6
 _LEARN_DEBUG = bool(os.environ.get("AI_KNOT_LEARN_DEBUG", ""))
 _PROFILE_INDEX_ENABLED = bool(os.environ.get("AI_KNOT_PROFILE_INDEX", ""))
 _K1_ROUTER_ENABLED = bool(os.environ.get("AI_KNOT_K1_ROUTER", ""))
+_NORMALIZERS_ENABLED = bool(os.environ.get("AI_KNOT_NORMALIZERS", ""))
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +191,8 @@ class KnowledgeBase(_LearningMixin):
         )
         # C6c: inject canonical date tags for temporal recall (mode-agnostic).
         enrich_date_tags(fact)
+        if _NORMALIZERS_ENABLED:
+            enrich_canonical_surface(fact)
         if self._profile_index is not None:
             self._profile_index.index_fact(fact)
 
