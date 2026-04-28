@@ -15,6 +15,8 @@ import ai_knot._spreading_activation as _ddsa
 from ai_knot._bm25 import _rrf_fuse
 from ai_knot._date_enrichment import enrich_date_tags
 from ai_knot._inverted_index import InvertedIndex, _char_trigrams, _slot_exact_score
+from ai_knot._k1_router import classify_k1
+from ai_knot._profile_index import ProfileIndex
 from ai_knot._query_intent import classify_recall_intent, get_pipeline_config
 from ai_knot._spreading_activation import spreading_activation
 from ai_knot.extractor import Extractor as Extractor  # noqa: F401  re-exported for tests
@@ -41,6 +43,8 @@ from ai_knot.types import (
 _LLM_EXPANSION_WEIGHT: float = 0.6
 
 _LEARN_DEBUG = bool(os.environ.get("AI_KNOT_LEARN_DEBUG", ""))
+_PROFILE_INDEX_ENABLED = bool(os.environ.get("AI_KNOT_PROFILE_INDEX", ""))
+_K1_ROUTER_ENABLED = bool(os.environ.get("AI_KNOT_K1_ROUTER", ""))
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +121,9 @@ class KnowledgeBase(_LearningMixin):
         self._query_expander: LLMQueryExpander | None = None
         self._default_provider_kwargs: dict[str, str] = dict(provider_kwargs)
         self._episodic_ttl_hours = episodic_ttl_hours
+        self._profile_index: ProfileIndex | None = (
+            ProfileIndex() if _PROFILE_INDEX_ENABLED else None
+        )
 
     # Jaccard threshold for near-duplicate detection in add().
     # 0.7 suppresses sliding-window stride-1 overlap (~0.84) while preserving
@@ -182,6 +189,8 @@ class KnowledgeBase(_LearningMixin):
         )
         # C6c: inject canonical date tags for temporal recall (mode-agnostic).
         enrich_date_tags(fact)
+        if self._profile_index is not None:
+            self._profile_index.index_fact(fact)
 
         # C6b v2: split enumeration/aggregation lists into atomic child facts
         # so raw/dated windows get the same treatment as learn/dated-learn.
@@ -1072,8 +1081,24 @@ class KnowledgeBase(_LearningMixin):
             head = list(pairs[:15])
             head.sort(key=lambda x: x[0].created_at)
             pairs = head + list(pairs[15:])
+        # K1 profile injection: prepend cited ProfileIndex rows as front matter
+        # when AI_KNOT_PROFILE_INDEX=1 and AI_KNOT_K1_ROUTER=1 are both set.
         seen: set[str] = set()
         lines: list[str] = []
+        if _K1_ROUTER_ENABLED and self._profile_index is not None:
+            k1 = classify_k1(query)
+            if k1 is not None:
+                profile_rows = self._profile_index.lookup(k1.entity, k1.facets)
+                bm25_ids = {f.id for f, _ in pairs}
+                for row in profile_rows:
+                    snippet = (
+                        f"[profile fact={row.fact_id}]"
+                        f" {row.entity} — {row.facet}: {row.value_snippet}"
+                    )
+                    if snippet not in seen and row.fact_id not in bm25_ids:
+                        seen.add(snippet)
+                        lines.append(f"[{len(lines) + 1}] {snippet}")
+
         for f, _ in pairs:
             text = f.prompt_surface or f.source_verbatim or f.content
             if f.entity and f.attribute:
