@@ -30,6 +30,17 @@ class TestCreateStorage:
         with pytest.raises(ValueError, match="DSN"):
             create_storage("postgres")
 
+    def test_sqlite_dsn_overrides_base_dir(self, tmp_path: Path) -> None:
+        custom_db = str(tmp_path / "custom.db")
+        storage = create_storage("sqlite", base_dir=str(tmp_path / "base"), dsn=custom_db)
+        assert isinstance(storage, SQLiteStorage)
+        assert storage._db_path == custom_db
+
+    def test_sqlite_fallback_to_base_dir_when_no_dsn(self, tmp_path: Path) -> None:
+        storage = create_storage("sqlite", base_dir=str(tmp_path))
+        assert isinstance(storage, SQLiteStorage)
+        assert storage._db_path == str(tmp_path / "ai_knot.db")
+
     def test_postgres_with_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Should read AI_KNOT_DSN from env when dsn= is not passed."""
         # We can't actually connect, but we can verify the env var path works
