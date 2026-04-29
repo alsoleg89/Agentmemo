@@ -15,7 +15,7 @@ import ai_knot._spreading_activation as _ddsa
 from ai_knot._bm25 import _rrf_fuse
 from ai_knot._date_enrichment import enrich_date_tags
 from ai_knot._inverted_index import InvertedIndex, _char_trigrams, _slot_exact_score
-from ai_knot._k1_router import classify_k1
+from ai_knot._k1_router import _extract_entity, classify_k1
 from ai_knot._profile_index import ProfileIndex, extract_entity_fields
 from ai_knot._query_intent import classify_recall_intent, get_pipeline_config
 from ai_knot._spreading_activation import spreading_activation
@@ -45,6 +45,7 @@ _LLM_EXPANSION_WEIGHT: float = 0.6
 _LEARN_DEBUG = bool(os.environ.get("AI_KNOT_LEARN_DEBUG", ""))
 _PROFILE_INDEX_ENABLED = bool(os.environ.get("AI_KNOT_PROFILE_INDEX", ""))
 _K1_ROUTER_ENABLED = bool(os.environ.get("AI_KNOT_K1_ROUTER", ""))
+_ENTITY_PACK_UNION_ENABLED = bool(os.environ.get("AI_KNOT_ENTITY_PACK_UNION", ""))
 
 logger = logging.getLogger(__name__)
 
@@ -883,6 +884,47 @@ class KnowledgeBase(_LearningMixin):
                 "post_mmr_ids": [f.id for f, _ in pairs],
                 "dropped_ids": [fid for fid in (_trace_pre_mmr_ids or []) if fid not in _post_mmr],
             }
+
+        # --- STAGE 4c: Entity-Pack Union ---
+        # Supplement the MMR pack with entity-filtered BM25 candidates to raise
+        # PackGoldRecall for entity questions (cat1/cat2).  Gold facts for entity
+        # queries are usually in the stage1 pool but outranked by less-specific
+        # facts in the 7-signal RRF — adding them post-MMR as supplementary
+        # context recovers them without displacing the ranked pack.
+        # Mirrors research/d2_k1_ensemble_selector.py ensemble_v2 (cat1 +0.090).
+        # Controlled by AI_KNOT_ENTITY_PACK_UNION env flag (default OFF).
+        _union_extras_added: list[str] = []
+        _union_entity = ""
+        _pack_was_expanded = False
+        if _ENTITY_PACK_UNION_ENABLED and pairs:
+            _union_entity = _extract_entity(query)
+            if _union_entity and len(_union_entity) > 2:
+                ent_lc = _union_entity.lower()
+                already_in_pack = {f.id for f, _ in pairs}
+                entity_pool: list[str] = []
+                for fid, f in fact_map.items():
+                    if fid in already_in_pack:
+                        continue
+                    if ent_lc in f.content.lower() or (f.entity and ent_lc in f.entity.lower()):
+                        entity_pool.append(fid)
+                # Rank by existing BM25 score; facts absent from bm25_raw get 0.0.
+                entity_pool.sort(key=lambda fid: bm25_raw.get(fid, 0.0), reverse=True)
+                max_extras = max(0, 2 * top_k - len(pairs))
+                for fid in entity_pool[:max_extras]:
+                    pairs.append((fact_map[fid], bm25_raw.get(fid, 0.0)))
+                    _union_extras_added.append(fid)
+                _pack_was_expanded = bool(_union_extras_added)
+        if trace is not None:
+            trace["stage4c_entity_pack_union"] = {
+                "applied": _pack_was_expanded,
+                "entity": _union_entity,
+                "extras_added": list(_union_extras_added),
+                "pack_size_post_union": len(pairs),
+            }
+            # Keep the stage1 invariant: union extras appear in from_entity_direct
+            # so that any future assertion pack ⊆ ⋃(stage1 channels) still holds.
+            if _pack_was_expanded:
+                trace["stage1_candidates"]["from_entity_direct"] = list(_union_extras_added)
 
         # Update access metadata on the *original* (unfiltered) fact objects so
         # that the subsequent save persists ALL facts, not just the filtered set.
