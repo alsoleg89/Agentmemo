@@ -8,8 +8,8 @@ import pathlib
 
 import pytest
 
-from ai_knot.knowledge import KnowledgeBase
 from ai_knot._mcp_tools import tool_recall_with_trace
+from ai_knot.knowledge import KnowledgeBase
 from ai_knot.storage.yaml_storage import YAMLStorage
 
 

@@ -14,6 +14,7 @@ from typing import Any
 import ai_knot._spreading_activation as _ddsa
 from ai_knot._bm25 import _rrf_fuse
 from ai_knot._date_enrichment import enrich_date_tags
+from ai_knot._direct_lookup import DirectLookup
 from ai_knot._inverted_index import InvertedIndex, _char_trigrams, _slot_exact_score
 from ai_knot._k1_router import _extract_entity, classify_k1
 from ai_knot._profile_index import ProfileIndex, extract_entity_fields
@@ -46,7 +47,8 @@ _LEARN_DEBUG = bool(os.environ.get("AI_KNOT_LEARN_DEBUG", ""))
 _PROFILE_INDEX_ENABLED = bool(os.environ.get("AI_KNOT_PROFILE_INDEX", ""))
 _K1_ROUTER_ENABLED = bool(os.environ.get("AI_KNOT_K1_ROUTER", ""))
 _ENTITY_PACK_UNION_ENABLED = bool(os.environ.get("AI_KNOT_ENTITY_PACK_UNION", ""))
-
+_DIRECT_LOOKUP_ENABLED = bool(os.environ.get("AI_KNOT_DIRECT_LOOKUP", ""))
+_DIRECT_LOOKUP_TOP_K = int(os.environ.get("AI_KNOT_DIRECT_LOOKUP_TOP_K", "8"))
 logger = logging.getLogger(__name__)
 
 # Patch the _LEARN_DEBUG flag into the learning module so pipeline stages log correctly.
@@ -125,6 +127,10 @@ class KnowledgeBase(_LearningMixin):
         self._profile_index: ProfileIndex | None = (
             ProfileIndex() if _PROFILE_INDEX_ENABLED else None
         )
+        self._direct_lookup: DirectLookup | None = (
+            DirectLookup(top_k=_DIRECT_LOOKUP_TOP_K) if _DIRECT_LOOKUP_ENABLED else None
+        )
+        self._last_direct_lookup: dict[str, list[Fact]] = {}
 
     # Jaccard threshold for near-duplicate detection in add().
     # 0.7 suppresses sliding-window stride-1 overlap (~0.84) while preserving
@@ -689,6 +695,26 @@ class KnowledgeBase(_LearningMixin):
                 dense_scores[f.id] = sim
                 candidate_ids.add(f.id)
 
+        # Stage 0b: Direct lookup — entity-filtered + cosine-ranked (render-injection channel).
+        # Operates independently of RRF; results go to _render_context as a structured block
+        # before the main pack. Bypasses ranking competition (B1: 86% gold in pool, not top-5).
+        self._last_direct_lookup = {}
+        if _DIRECT_LOOKUP_ENABLED and self._direct_lookup is not None and query_vector is not None:
+            dl_result, dl_trace = self._direct_lookup.lookup(
+                query_vector, query, candidate_facts, self._dense._vectors
+            )
+            self._last_direct_lookup = dl_result
+            if trace is not None:
+                trace["stage_direct_lookup"] = dl_trace
+        elif trace is not None:
+            trace["stage_direct_lookup"] = {
+                "applied": False,
+                "entities": [],
+                "facts_per_entity": {},
+                "top_k": _DIRECT_LOOKUP_TOP_K,
+                "reason": "disabled" if not _DIRECT_LOOKUP_ENABLED else "no_query_vector",
+            }
+
         if trace is not None:
             _prev = (
                 (_trace_ch_a or set())
@@ -1127,17 +1153,25 @@ class KnowledgeBase(_LearningMixin):
         """Render (Fact, score) pairs into the formatted context string for prompt injection.
 
         Applies sort_strategy, K1 profile injection, and entity-attribute prefix.
+        If AI_KNOT_DIRECT_LOOKUP is enabled, prepends a structured "Related to {entity}"
+        block before the main pack (render-injection, not pool-injection).
         Shared by recall() and recall_with_trace() to avoid double retrieval.
         """
-        if not pairs:
+        direct_lookup = self._last_direct_lookup
+
+        # Build direct lookup block (MIRIX/memvid pattern: structured block before pack).
+        dl_parts: list[str] = []
+        if direct_lookup:
+            for entity, entity_facts in direct_lookup.items():
+                block_lines = [f"Related to {entity}:"]
+                for f in entity_facts:
+                    text = f.prompt_surface or f.source_verbatim or f.content
+                    block_lines.append(f"  - {text}")
+                dl_parts.append("\n".join(block_lines))
+
+        if not pairs and not dl_parts:
             return ""
-        config = get_pipeline_config(classify_recall_intent(query))
-        if config.sort_strategy == "sandwich":
-            pairs = self._sandwich_reorder(pairs)
-        elif config.sort_strategy == "chronological":
-            head = list(pairs[:15])
-            head.sort(key=lambda x: x[0].created_at)
-            pairs = head + list(pairs[15:])
+
         seen: set[str] = set()
         lines: list[str] = []
         if _K1_ROUTER_ENABLED and self._profile_index is not None:
@@ -1152,6 +1186,15 @@ class KnowledgeBase(_LearningMixin):
                     if snippet not in seen:
                         seen.add(snippet)
                         lines.append(f"[{len(lines) + 1}] {snippet}")
+
+        config = get_pipeline_config(classify_recall_intent(query))
+        if config.sort_strategy == "sandwich":
+            pairs = self._sandwich_reorder(pairs)
+        elif config.sort_strategy == "chronological":
+            head = list(pairs[:15])
+            head.sort(key=lambda x: x[0].created_at)
+            pairs = head + list(pairs[15:])
+
         for f, _ in pairs:
             text = f.prompt_surface or f.source_verbatim or f.content
             if f.entity and f.attribute:
@@ -1159,7 +1202,15 @@ class KnowledgeBase(_LearningMixin):
             if text not in seen:
                 seen.add(text)
                 lines.append(f"[{len(lines) + 1}] {text}")
-        return "\n".join(lines)
+
+        main_pack = "\n".join(lines)
+
+        if dl_parts:
+            dl_block = "\n\n".join(dl_parts)
+            if main_pack:
+                return dl_block + "\n\nAdditional context:\n" + main_pack
+            return dl_block
+        return main_pack
 
     def recall(
         self,

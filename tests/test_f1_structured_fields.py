@@ -7,8 +7,8 @@ import pathlib
 
 import pytest
 
-from ai_knot.knowledge import KnowledgeBase
 from ai_knot._profile_index import extract_entity_fields
+from ai_knot.knowledge import KnowledgeBase
 from ai_knot.storage.yaml_storage import YAMLStorage
 
 
@@ -56,14 +56,18 @@ class TestAddPopulatesStructuredFields:
     def test_structured_fields_persisted_in_storage(self, kb: KnowledgeBase) -> None:
         kb.add("[2023-06-01] Alice: Alice enjoys reading books in her spare time.")
         stored = kb.list_facts()
-        dated_fact = next((f for f in stored if "Alice" in f.content and "reading" in f.content), None)
+        dated_fact = next(
+            (f for f in stored if "Alice" in f.content and "reading" in f.content), None
+        )
         assert dated_fact is not None
         assert dated_fact.entity == "Alice"
         assert dated_fact.attribute == "books"
 
     def test_entity_hop_fires_after_f1(self, kb: KnowledgeBase) -> None:
         """After F1 fix, Channel C entity-hop should connect value_text tokens to entities."""
-        kb.add("[2023-05-10] Alice: Alice works at the hospital as a doctor.", )
+        kb.add(
+            "[2023-05-10] Alice: Alice works at the hospital as a doctor.",
+        )
         kb.add("[2023-05-12] Bob: Bob loves hiking on weekends.")
         results = kb.recall_facts("hiking outdoors activities", top_k=5)
         assert any("hiking" in f.content.lower() for f in results)

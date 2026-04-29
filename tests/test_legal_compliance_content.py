@@ -30,6 +30,10 @@ SKIP_DIR_NAMES = {
     ".ai_knot_v2",
     ".claude",
     "data",
+    # Benchmark research output: scripts + JSON artifacts from local runs.
+    # All files here are untracked and absent from CI. Skipping avoids false
+    # positives from LoCoMo benchmark data (diverse conversation topics).
+    "research",
 }
 SKIP_FILE_NAMES = {"compliance_allowlist.txt", "test_legal_compliance_content.py"}
 TEXT_EXTENSIONS = {".py", ".md", ".txt", ".json", ".yaml", ".yml"}

@@ -1,8 +1,30 @@
 # Research Index — ai-knot
 
-**Обновлён:** 2026-04-12
+**Обновлён:** 2026-04-29
 
 Навигация по всем материалам в `research/`. Организовано по темам.
+
+---
+
+## Session Reports (хронология)
+
+| Файл | Дата | Что внутри |
+|------|------|-----------|
+| [d2_channel_e_replay_with_dense_20260429.json](d2_channel_e_replay_with_dense_20260429.json) | **2026-04-29** | **C2 dense rebaseline (OpenAI text-embedding-3-small).** v0_dense cat1=0.205 (PASS prod parity). Channel E no-op holds with dense pool (Δ=+0.000). |
+| [d2_k1_ensemble_selector_20260429.json](d2_k1_ensemble_selector_20260429.json) | **2026-04-29** | **C1 ensemble selector.** ensemble_v2 (union): cat1 +0.090, cat2 +0.209, cat4 +0.179, cat5 +0.089. ensemble_v1 cat5 REGRESSION −0.069. pure BM25 cat5 +0.207 (RRF hurts synthesis). |
+| [d2_oracle_pgr_ceiling_20260429.json](d2_oracle_pgr_ceiling_20260429.json) | **2026-04-29** | **B3 oracle PGR ceiling.** strict=0.121 (router blocks 69.5%). permissive=1.000. Extraction-first fails: ceiling < 0.25. |
+| [d2_extraction_failure_modes_20260429.json](d2_extraction_failure_modes_20260429.json) | **2026-04-29** | **B2 failure breakdown.** 93.9% FACET_VOCAB_GAP but top-30 tokens are filler (great/thank/awesome). Vocab expansion adds noise, not signal. |
+| [d2_cat1_per_question_audit_20260429.json](d2_cat1_per_question_audit_20260429.json) | **2026-04-29** | **B1 gold audit.** 86% pool_hit_pack_miss. **RANKING bottleneck confirmed.** Extraction is NOT the problem. stage1_miss_index_hit=0% confirms A3 no-op. |
+| [d2_extraction_coverage_20260429.json](d2_extraction_coverage_20260429.json) | **2026-04-28/29** | **A1 extraction coverage.** with_full_triple=42.5% (FAIL), F1/F2 absent in c1-baseline. |
+| [d2_k1_lookup_hit_rate_20260429.json](d2_k1_lookup_hit_rate_20260429.json) | **2026-04-29** | **A2 router+lookup.** cat1 router_hit=27.6% (FAIL), lookup_has_gold=50% (PARTIAL). |
+| [d2_channel_e_replay_20260429.json](d2_channel_e_replay_20260429.json) | **2026-04-29** | **A3 Channel E replay.** v2 delta=+0.000 (complete no-op). exclusive gold=0/66. |
+| [memory_kernel_v2_structural_recommendation_20260429.md](memory_kernel_v2_structural_recommendation_20260429.md) | **2026-04-29** | **АКТУАЛЬНО.** Full causal diagnosis B1-B3 + C1-C2. **BRANCH NEW: Entity-Pack Union (ranking fix)**. cat1 projected +9pp, cat5 +9pp via union approach. |
+| [d1_alt_dense_rrf_20260428_205956.json](d1_alt_dense_rrf_20260428_205956.json) | **2026-04-28** | **D1-alt dense RRF.** Dense pool 5→20 + dense as 7th RRF signal (w=2.0): cat1 PGR 0.152→0.183 (+0.031), cat2 +0.040, cat4 +0.057. Ceiling pool=20: 47.2% gold reachable. Implemented in knowledge.py. |
+| [d1_replay_results_20260428.md](d1_replay_results_20260428.md) | **2026-04-28** | **D1 KILL RULE.** Entity-boost falsified: +0.9pp cat1 PGR (need +55pp). Root cause: semantic mismatch — query "martial arts" vs fact "kickboxing". 44.8% gold facts rank >60 in BM25. Next: dense retrieval or wider pack. |
+| [memory_kernel_v2_20260428.md](memory_kernel_v2_20260428.md) | **2026-04-28** | MemoryKernel v2 synthesis: 16 projects code-level audit (Mem0/Graphiti/LlamaIndex/etc). PackGoldRecall=58.5% windowed bottleneck. Entity-boost greenlit as D1 (now falsified). Stage D2-D5 on hold. |
+| [session_report_20260428.md](session_report_20260428.md) | **2026-04-28** | **АКТУАЛЬНО.** Phase 3+4 results + полный анализ 10 фаз. cat1 trajectory: 17→18→15. Root cause: pack size=12 + vocabulary inflation. Next: Phase 5 + pack size increase. |
+| [session_report_20260427.md](session_report_20260427.md) | 2026-04-27 | DSN bug fix + temporal anchor (+17pp cat2) + Codex data-audit: 3 ignored LoCoMo surfaces, +9 migration table. |
+| [k1_metric_breakthrough_report_20260427.md](k1_metric_breakthrough_report_20260427.md) | 2026-04-27 | Codex full audit: coverage analysis, primary +9 migration, reserve bank, architecture hypothesis. |
 
 ---
 
