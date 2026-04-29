@@ -27,7 +27,7 @@ class TestEntityPackUnionFlagOff:
         monkeypatch.setattr(_kb_module, "_ENTITY_PACK_UNION_ENABLED", False)
         for i in range(10):
             kb.add(f"Melanie went hiking on day {i}.")
-        pairs, trace = kb.recall_facts_with_trace("Melanie hobbies", top_k=5)
+        pairs, trace = kb.recall_facts_with_trace("What are Melanie's hobbies?", top_k=5)
 
         assert len(pairs) <= 5
         assert (
@@ -42,7 +42,7 @@ class TestEntityPackUnionFlagOn:
         monkeypatch.setattr(_kb_module, "_ENTITY_PACK_UNION_ENABLED", True)
         for i in range(12):
             kb.add(f"Melanie did activity number {i} this week.")
-        pairs, trace = kb.recall_facts_with_trace("Melanie hobbies", top_k=5)
+        pairs, trace = kb.recall_facts_with_trace("What are Melanie's hobbies?", top_k=5)
 
         union_info = trace.get("stage4c_entity_pack_union", {})
         if union_info.get("applied"):
@@ -71,7 +71,7 @@ class TestEntityPackUnionFlagOn:
         # Only 4 facts mention Sarah — all will fit in top_k=5; nothing to add.
         for i in range(4):
             kb.add(f"Sarah went swimming on day {i}.")
-        pairs, trace = kb.recall_facts_with_trace("Sarah hobbies", top_k=5)
+        pairs, trace = kb.recall_facts_with_trace("What are Sarah's hobbies?", top_k=5)
 
         union_info = trace.get("stage4c_entity_pack_union", {})
         # Pack covers all Sarah facts, so no extras beyond what MMR already selected.
@@ -85,7 +85,7 @@ class TestEntityPackUnionFlagOn:
         monkeypatch.setattr(_kb_module, "_ENTITY_PACK_UNION_ENABLED", True)
         for i in range(50):
             kb.add(f"Carol completed task {i} for the project.")
-        pairs, trace = kb.recall_facts_with_trace("Carol activities", top_k=5)
+        pairs, trace = kb.recall_facts_with_trace("What are Carol's activities?", top_k=5)
 
         assert len(pairs) <= 10
 
@@ -95,7 +95,7 @@ class TestEntityPackUnionFlagOn:
         """stage4c_entity_pack_union key is always written when flag is on."""
         monkeypatch.setattr(_kb_module, "_ENTITY_PACK_UNION_ENABLED", True)
         kb.add("Alice loves painting.")
-        _, trace = kb.recall_facts_with_trace("Alice hobbies", top_k=5)
+        _, trace = kb.recall_facts_with_trace("What are Alice's hobbies?", top_k=5)
 
         assert "stage4c_entity_pack_union" in trace
         info = trace["stage4c_entity_pack_union"]
@@ -111,7 +111,7 @@ class TestEntityPackUnionFlagOn:
         monkeypatch.setattr(_kb_module, "_ENTITY_PACK_UNION_ENABLED", True)
         for i in range(12):
             kb.add(f"David completed task {i} this month.")
-        pairs, trace = kb.recall_facts_with_trace("David activities", top_k=5)
+        pairs, trace = kb.recall_facts_with_trace("What are David's activities?", top_k=5)
 
         union_info = trace.get("stage4c_entity_pack_union", {})
         if union_info.get("applied"):
