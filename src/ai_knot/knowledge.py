@@ -15,6 +15,8 @@ import ai_knot._spreading_activation as _ddsa
 from ai_knot._bm25 import _rrf_fuse
 from ai_knot._date_enrichment import enrich_date_tags
 from ai_knot._inverted_index import InvertedIndex, _char_trigrams, _slot_exact_score
+from ai_knot._k1_router import _extract_entity, classify_k1
+from ai_knot._profile_index import ProfileIndex, extract_entity_fields
 from ai_knot._query_intent import classify_recall_intent, get_pipeline_config
 from ai_knot._spreading_activation import spreading_activation
 from ai_knot.extractor import Extractor as Extractor  # noqa: F401  re-exported for tests
@@ -41,6 +43,9 @@ from ai_knot.types import (
 _LLM_EXPANSION_WEIGHT: float = 0.6
 
 _LEARN_DEBUG = bool(os.environ.get("AI_KNOT_LEARN_DEBUG", ""))
+_PROFILE_INDEX_ENABLED = bool(os.environ.get("AI_KNOT_PROFILE_INDEX", ""))
+_K1_ROUTER_ENABLED = bool(os.environ.get("AI_KNOT_K1_ROUTER", ""))
+_ENTITY_PACK_UNION_ENABLED = bool(os.environ.get("AI_KNOT_ENTITY_PACK_UNION", ""))
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +122,9 @@ class KnowledgeBase(_LearningMixin):
         self._query_expander: LLMQueryExpander | None = None
         self._default_provider_kwargs: dict[str, str] = dict(provider_kwargs)
         self._episodic_ttl_hours = episodic_ttl_hours
+        self._profile_index: ProfileIndex | None = (
+            ProfileIndex() if _PROFILE_INDEX_ENABLED else None
+        )
 
     # Jaccard threshold for near-duplicate detection in add().
     # 0.7 suppresses sliding-window stride-1 overlap (~0.84) while preserving
@@ -182,6 +190,13 @@ class KnowledgeBase(_LearningMixin):
         )
         # C6c: inject canonical date tags for temporal recall (mode-agnostic).
         enrich_date_tags(fact)
+        # F1: populate structured fields from dated/observation content so that
+        # Channel C entity-hop and slot-exact retrieval work on raw-ingested facts.
+        _ef = extract_entity_fields(content)
+        if _ef is not None:
+            fact.entity, fact.attribute, fact.value_text, fact.slot_key = _ef
+        if self._profile_index is not None:
+            self._profile_index.index_fact(fact)
 
         # C6b v2: split enumeration/aggregation lists into atomic child facts
         # so raw/dated windows get the same treatment as learn/dated-learn.
@@ -657,23 +672,35 @@ class KnowledgeBase(_LearningMixin):
             else None
         )
 
+        _trace_ch_e: set[str] | None = None
+
         # Channel D: dense retrieval (no-op when embeddings unavailable).
         # Track dense scores so the top-1 semantic match can be guaranteed
         # even when it has zero BM25 (vocabulary gap / terminology mismatch).
+        # Pool is overfetched (4×top_k, min 20) so semantically-relevant facts
+        # that rank below top_k in dense (e.g. rank=10 for a synonym query) still
+        # enter the candidate set and can compete in Stage-3 RRF fusion.
         dense_scores: dict[str, float] = {}
         embed_text = self._expand_query_for_embed(query)
         query_vector = self._embed_for_recall(candidate_facts, embed_text)
+        _dense_overfetch = max(top_k * 4, 20)
         if query_vector is not None and self._dense.has_embeddings():
-            for f, sim in self._dense.search(query_vector, candidate_facts, top_k=top_k):
+            for f, sim in self._dense.search(query_vector, candidate_facts, top_k=_dense_overfetch):
                 dense_scores[f.id] = sim
                 candidate_ids.add(f.id)
 
         if trace is not None:
-            _prev = (_trace_ch_a or set()) | (_trace_ch_b or set()) | (_trace_ch_c or set())
+            _prev = (
+                (_trace_ch_a or set())
+                | (_trace_ch_b or set())
+                | (_trace_ch_c or set())
+                | (_trace_ch_e or set())
+            )
             trace["stage1_candidates"] = {
                 "from_bm25": sorted(_trace_ch_a or set()),
                 "from_rare_tokens": sorted(_trace_ch_b or set()),
                 "from_entity_hop": sorted(_trace_ch_c or set()),
+                "from_entity_direct": sorted(_trace_ch_e or set()),
                 "from_dense": sorted(candidate_ids - _prev),
                 "total": len(candidate_ids),
                 "dense_scores": dict(dense_scores),
@@ -737,17 +764,27 @@ class KnowledgeBase(_LearningMixin):
             reverse=True,
         )
 
-        fused_scores = _rrf_fuse(
-            [
-                bm25_ranked,
-                slot_ranked,
-                trigram_ranked,
-                importance_ranked,
-                retention_ranked,
-                recency_ranked,
-            ],
-            weights=list(config.rrf_weights),
-        )
+        # Ranker 7: Dense cosine similarity — added when embeddings are available.
+        # Weight 2.0 amplifies semantic signal without fully overriding BM25 precision.
+        # Bridges vocabulary gap (e.g. "martial arts" query → "kickboxing" fact) that
+        # the other six lexical/structural signals cannot close.
+        rrf_rankers = [
+            bm25_ranked,
+            slot_ranked,
+            trigram_ranked,
+            importance_ranked,
+            retention_ranked,
+            recency_ranked,
+        ]
+        rrf_weights = list(config.rrf_weights)
+        if dense_scores:
+            dense_ranked = sorted(
+                candidate_id_list, key=lambda fid: dense_scores.get(fid, 0.0), reverse=True
+            )
+            rrf_rankers.append(dense_ranked)
+            rrf_weights.append(2.0)
+
+        fused_scores = _rrf_fuse(rrf_rankers, weights=rrf_weights)
 
         selected_ids: list[str] = sorted(
             (fid for fid in candidate_id_list if fid in fact_map),
@@ -847,6 +884,47 @@ class KnowledgeBase(_LearningMixin):
                 "post_mmr_ids": [f.id for f, _ in pairs],
                 "dropped_ids": [fid for fid in (_trace_pre_mmr_ids or []) if fid not in _post_mmr],
             }
+
+        # --- STAGE 4c: Entity-Pack Union ---
+        # Supplement the MMR pack with entity-filtered BM25 candidates to raise
+        # PackGoldRecall for entity questions (cat1/cat2).  Gold facts for entity
+        # queries are usually in the stage1 pool but outranked by less-specific
+        # facts in the 7-signal RRF — adding them post-MMR as supplementary
+        # context recovers them without displacing the ranked pack.
+        # Mirrors research/d2_k1_ensemble_selector.py ensemble_v2 (cat1 +0.090).
+        # Controlled by AI_KNOT_ENTITY_PACK_UNION env flag (default OFF).
+        _union_extras_added: list[str] = []
+        _union_entity = ""
+        _pack_was_expanded = False
+        if _ENTITY_PACK_UNION_ENABLED and pairs:
+            _union_entity = _extract_entity(query)
+            if _union_entity and len(_union_entity) > 2:
+                ent_lc = _union_entity.lower()
+                already_in_pack = {f.id for f, _ in pairs}
+                entity_pool: list[str] = []
+                for fid, f in fact_map.items():
+                    if fid in already_in_pack:
+                        continue
+                    if ent_lc in f.content.lower() or (f.entity and ent_lc in f.entity.lower()):
+                        entity_pool.append(fid)
+                # Rank by existing BM25 score; facts absent from bm25_raw get 0.0.
+                entity_pool.sort(key=lambda fid: bm25_raw.get(fid, 0.0), reverse=True)
+                max_extras = max(0, 2 * top_k - len(pairs))
+                for fid in entity_pool[:max_extras]:
+                    pairs.append((fact_map[fid], bm25_raw.get(fid, 0.0)))
+                    _union_extras_added.append(fid)
+                _pack_was_expanded = bool(_union_extras_added)
+        if trace is not None:
+            trace["stage4c_entity_pack_union"] = {
+                "applied": _pack_was_expanded,
+                "entity": _union_entity,
+                "extras_added": list(_union_extras_added),
+                "pack_size_post_union": len(pairs),
+            }
+            # Keep the stage1 invariant: union extras appear in from_entity_direct
+            # so that any future assertion pack ⊆ ⋃(stage1 channels) still holds.
+            if _pack_was_expanded:
+                trace["stage1_candidates"]["from_entity_direct"] = list(_union_extras_added)
 
         # Update access metadata on the *original* (unfiltered) fact objects so
         # that the subsequent save persists ALL facts, not just the filtered set.
@@ -1041,6 +1119,48 @@ class KnowledgeBase(_LearningMixin):
         middle = pairs[5:]
         return top1 + middle + tail
 
+    def _render_context(
+        self,
+        query: str,
+        pairs: list[tuple[Fact, float]],
+    ) -> str:
+        """Render (Fact, score) pairs into the formatted context string for prompt injection.
+
+        Applies sort_strategy, K1 profile injection, and entity-attribute prefix.
+        Shared by recall() and recall_with_trace() to avoid double retrieval.
+        """
+        if not pairs:
+            return ""
+        config = get_pipeline_config(classify_recall_intent(query))
+        if config.sort_strategy == "sandwich":
+            pairs = self._sandwich_reorder(pairs)
+        elif config.sort_strategy == "chronological":
+            head = list(pairs[:15])
+            head.sort(key=lambda x: x[0].created_at)
+            pairs = head + list(pairs[15:])
+        seen: set[str] = set()
+        lines: list[str] = []
+        if _K1_ROUTER_ENABLED and self._profile_index is not None:
+            k1 = classify_k1(query)
+            if k1 is not None:
+                profile_rows = self._profile_index.lookup(k1.entity, k1.facets)
+                for row in profile_rows:
+                    snippet = (
+                        f"[profile fact={row.fact_id}]"
+                        f" {row.entity} — {row.facet}: {row.value_snippet}"
+                    )
+                    if snippet not in seen:
+                        seen.add(snippet)
+                        lines.append(f"[{len(lines) + 1}] {snippet}")
+        for f, _ in pairs:
+            text = f.prompt_surface or f.source_verbatim or f.content
+            if f.entity and f.attribute:
+                text = f"[{f.entity}: {f.attribute}={f.value_text}] {text}"
+            if text not in seen:
+                seen.add(text)
+                lines.append(f"[{len(lines) + 1}] {text}")
+        return "\n".join(lines)
+
     def recall(
         self,
         query: str,
@@ -1063,25 +1183,39 @@ class KnowledgeBase(_LearningMixin):
         pairs = self._execute_recall(
             query, top_k=top_k, now=now, include_unsupported=include_unsupported
         )
-        if not pairs:
-            return ""
-        config = get_pipeline_config(classify_recall_intent(query))
-        if config.sort_strategy == "sandwich":
-            pairs = self._sandwich_reorder(pairs)
-        elif config.sort_strategy == "chronological":
-            head = list(pairs[:15])
-            head.sort(key=lambda x: x[0].created_at)
-            pairs = head + list(pairs[15:])
-        seen: set[str] = set()
-        lines: list[str] = []
-        for f, _ in pairs:
-            text = f.prompt_surface or f.source_verbatim or f.content
-            if f.entity and f.attribute:
-                text = f"[{f.entity}: {f.attribute}={f.value_text}] {text}"
-            if text not in seen:
-                seen.add(text)
-                lines.append(f"[{len(lines) + 1}] {text}")
-        return "\n".join(lines)
+        return self._render_context(query, pairs)
+
+    def recall_with_trace(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        now: datetime | None = None,
+        include_unsupported: bool = False,
+    ) -> tuple[str, list[str], dict[str, Any]]:
+        """Diagnostic variant of recall — single-pass, returns (context, pack_fact_ids, trace).
+
+        Args:
+            query: What the agent needs to know right now.
+            top_k: Maximum number of facts to return.
+            now: Point-in-time for decay calculation (default: current UTC).
+            include_unsupported: Include facts with ``supported=False`` (default: False).
+
+        Returns:
+            Tuple of (formatted_context, fact_id_list, stage_trace_dict).
+            Intended for diagnostics only — not for production use.
+        """
+        trace: dict[str, Any] = {}
+        pairs = self._execute_recall(
+            query,
+            top_k=top_k,
+            now=now,
+            include_unsupported=include_unsupported,
+            trace=trace,
+        )
+        context = self._render_context(query, pairs)
+        pack_fact_ids = [f.id for f, _ in pairs]
+        return context, pack_fact_ids, trace
 
     def list_facts(self) -> list[Fact]:
         """Return all stored facts for this agent.

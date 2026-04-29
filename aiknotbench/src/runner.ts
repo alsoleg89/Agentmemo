@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { readdirSync } from "node:fs";
@@ -308,6 +309,15 @@ export async function runBenchmark(opts: RunOptions): Promise<Report> {
 
     try {
       if (!cp!.ingested.includes(conv.idx)) {
+        const runDb = dbPath(runId);
+        // Guard only fires on the first ingest of a run: DB must be empty then.
+        // Subsequent convs legitimately share the same DB.
+        if (cp!.ingested.length === 0 && existsSync(runDb) && statSync(runDb).size > 0) {
+          throw new Error(
+            `[preflight] Non-empty DB already exists at ${runDb}. ` +
+              `Use --force to delete the run and start fresh.`
+          );
+        }
         process.stdout.write(
           `  conv ${convLabel}/${dataset.length} — ingesting ${conv.turns.length} turns… `
         );

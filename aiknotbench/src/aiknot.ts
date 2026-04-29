@@ -1,7 +1,7 @@
 import { KnowledgeBase } from "ai-knot";
 import type { Session } from "./locomo.js";
 
-export type IngestMode = "raw" | "dated" | "session";
+export type IngestMode = "raw" | "dated" | "session" | "windowed";
 
 /**
  * Per-conversation adapter around ai-knot KnowledgeBase.
@@ -44,6 +44,8 @@ export class AiknotAdapter {
   async ingest(turns: string[], sessions?: Session[]): Promise<void> {
     if (this.ingestMode === "dated" && sessions && sessions.length > 0) {
       await this.ingestDated(sessions);
+    } else if (this.ingestMode === "windowed" && sessions && sessions.length > 0) {
+      await this.ingestWindowed(sessions);
     } else if (this.ingestMode === "session" && sessions && sessions.length > 0) {
       await this.ingestSessions(sessions);
     } else {
@@ -59,12 +61,25 @@ export class AiknotAdapter {
   }
 
   /**
-   * Dated mode: sliding 3-turn window per session, prefixed with `[session.date] `.
-   * Mirrors the pf3-runtime ingest pattern: each turn becomes a fact whose context
-   * is the surrounding 3 turns and whose date prefix lets enrich_date_tags inject
-   * canonical date tags for cat2 (temporal) recall.
+   * Dated mode: one fact per speaker-turn, prefixed with `[session.date] `.
+   * Each fact contains a single speaker's turn so that speaker attribution is
+   * unambiguous for downstream profile/entity routing.
    */
   private async ingestDated(sessions: Session[]): Promise<void> {
+    for (const session of sessions) {
+      const prefix = session.date ? `[${session.date}] ` : "";
+      for (const turn of session.turns) {
+        await this.kb.add(`${prefix}${turn}`);
+      }
+    }
+  }
+
+  /**
+   * Windowed mode: 3-turn sliding window with date prefix (pre-Stage-A behavior).
+   * Preserves retrieval token density at the cost of multi-speaker attribution.
+   * Use with top_k=60 to match the historical baseline configuration.
+   */
+  private async ingestWindowed(sessions: Session[]): Promise<void> {
     const WINDOW = 3;
     for (const session of sessions) {
       const prefix = session.date ? `[${session.date}] ` : "";
