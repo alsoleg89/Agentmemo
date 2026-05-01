@@ -111,3 +111,23 @@ class TestPipelineConfigMatrix:
     def test_broad_context_no_filter(self) -> None:
         config = get_pipeline_config(RecallIntent.BROAD_CONTEXT)
         assert config.memory_type_filter is None
+
+    def test_dense_rrf_weight_all_intents(self) -> None:
+        """Every intent must have a dense_rrf_weight ≥ 0; FACTUAL must be highest."""
+        for intent in RecallIntent:
+            config = get_pipeline_config(intent)
+            assert config.dense_rrf_weight >= 0.0, (
+                f"{intent}: dense_rrf_weight={config.dense_rrf_weight} must be non-negative"
+            )
+        factual_w = get_pipeline_config(RecallIntent.FACTUAL).dense_rrf_weight
+        broad_w = get_pipeline_config(RecallIntent.BROAD_CONTEXT).dense_rrf_weight
+        assert factual_w > broad_w, (
+            "FACTUAL dense weight must exceed BROAD_CONTEXT to keep importance dominant "
+            "on short/vague queries"
+        )
+
+    def test_dense_rrf_weight_nonneg(self) -> None:
+        """Regression: dense_rrf_weight must never go negative (Stage-3 RRF guard)."""
+        for intent in RecallIntent:
+            w = get_pipeline_config(intent).dense_rrf_weight
+            assert w >= 0.0
