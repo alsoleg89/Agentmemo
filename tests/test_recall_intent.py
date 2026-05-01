@@ -77,9 +77,12 @@ class TestPipelineConfigMatrix:
                 f"{intent}: sort_strategy={config.sort_strategy!r} not in {valid}"
             )
 
-    def test_factual_high_bm25_weight(self) -> None:
+    def test_factual_point_query_signals(self) -> None:
         config = get_pipeline_config(RecallIntent.FACTUAL)
-        assert config.rrf_weights[0] >= 8, "FACTUAL should have high BM25 weight"
+        # BM25 is moderate (≥4) for lexical precision on point queries.
+        assert config.rrf_weights[0] >= 4, "FACTUAL should have meaningful BM25 weight"
+        # Dense is the primary semantic signal — replay-validated +0.12 cat1 PGR.
+        assert config.dense_rrf_weight >= 6, "FACTUAL should have high dense weight"
         assert config.mmr_lambda >= 0.8, "FACTUAL should have high MMR lambda (precision)"
         assert config.sort_strategy == "relevance"
         assert config.skip_prf is True

@@ -346,6 +346,10 @@ class PipelineConfig:
         use_ddsa: Whether to run spreading-activation expansion (Stage 4a).
         sort_strategy: Final sort mode for recall() — 'relevance', 'chronological',
             or 'sandwich'.
+        dense_rrf_weight: Weight for the dense (embedding) signal appended as an
+            8th RRF ranker when embeddings are available.  0.0 = no dense in RRF.
+            Per-intent tuning prevents dense from overriding BM25+importance on
+            short/vague queries (e.g. BROAD_CONTEXT).
         memory_type_filter: When set, exclude facts of all other MemoryTypes.
         field_weights_override: Optional BM25F field weight overrides passed to
             InvertedIndex.score(). Keys: 'content', 'tags', 'canonical', 'evidence'.
@@ -356,6 +360,7 @@ class PipelineConfig:
     mmr_lambda: float
     use_ddsa: bool
     sort_strategy: str  # 'relevance' | 'chronological' | 'sandwich'
+    dense_rrf_weight: float = 0.0
     memory_type_filter: MemoryType | None = None
     field_weights_override: dict[str, float] | None = None
 
@@ -363,12 +368,15 @@ class PipelineConfig:
 # Registry mapping RecallIntent → PipelineConfig.
 # RRF weight order: (BM25, slot-exact, trigram, importance, retention, recency).
 _PIPELINE_CONFIGS: dict[RecallIntent, PipelineConfig] = {
+    # FACTUAL: dense leads alongside BM25 for point queries.
+    # dense_rrf_weight=8.0 validated by replay (+0.12 cat1 PGR, no cat3 regression).
     RecallIntent.FACTUAL: PipelineConfig(
         skip_prf=True,
-        rrf_weights=(10.0, 5.0, 2.0, 0.5, 0.5, 0.0),
+        rrf_weights=(5.0, 5.0, 2.0, 0.5, 0.5, 0.0),
         mmr_lambda=0.85,
         use_ddsa=False,
         sort_strategy="relevance",
+        dense_rrf_weight=8.0,
     ),
     RecallIntent.AGGREGATIONAL: PipelineConfig(
         skip_prf=False,
@@ -376,6 +384,7 @@ _PIPELINE_CONFIGS: dict[RecallIntent, PipelineConfig] = {
         mmr_lambda=0.3,
         use_ddsa=False,
         sort_strategy="sandwich",
+        dense_rrf_weight=4.0,
     ),
     RecallIntent.EXPLORATORY: PipelineConfig(
         skip_prf=False,
@@ -383,6 +392,7 @@ _PIPELINE_CONFIGS: dict[RecallIntent, PipelineConfig] = {
         mmr_lambda=0.65,
         use_ddsa=True,
         sort_strategy="chronological",
+        dense_rrf_weight=4.0,
     ),
     RecallIntent.NAVIGATIONAL: PipelineConfig(
         skip_prf=True,
@@ -390,6 +400,7 @@ _PIPELINE_CONFIGS: dict[RecallIntent, PipelineConfig] = {
         mmr_lambda=0.9,
         use_ddsa=False,
         sort_strategy="relevance",
+        dense_rrf_weight=4.0,
         field_weights_override={"tags": 5.0, "canonical": 3.0},
     ),
     RecallIntent.PROCEDURAL: PipelineConfig(
@@ -398,17 +409,22 @@ _PIPELINE_CONFIGS: dict[RecallIntent, PipelineConfig] = {
         mmr_lambda=0.7,
         use_ddsa=False,
         sort_strategy="relevance",
+        dense_rrf_weight=4.0,
         # memory_type_filter is intentionally None here: auto-filtering by MemoryType
         # from query intent alone is too aggressive and silently drops SEMANTIC facts
         # about deployments, policies etc. stored via kb.add().
         # Enterprise-only isolation should be enforced at the KnowledgeBase level, not here.
     ),
+    # BROAD_CONTEXT: short/vague queries — keep BM25+importance dominant.
+    # dense_rrf_weight=2.0 prevents pseudo-random dense scores from overriding
+    # the importance/retention signal when BM25 evidence is sparse.
     RecallIntent.BROAD_CONTEXT: PipelineConfig(
         skip_prf=True,
         rrf_weights=(3.0, 1.0, 1.0, 6.0, 5.0, 2.0),
         mmr_lambda=0.5,
         use_ddsa=True,
         sort_strategy="relevance",
+        dense_rrf_weight=2.0,
     ),
 }
 
