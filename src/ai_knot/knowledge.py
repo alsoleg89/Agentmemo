@@ -658,13 +658,14 @@ class KnowledgeBase(_LearningMixin):
         )
 
         # Channel D: dense retrieval (no-op when embeddings unavailable).
-        # Track dense scores so the top-1 semantic match can be guaranteed
-        # even when it has zero BM25 (vocabulary gap / terminology mismatch).
+        # Overfetch so dense candidates beyond BM25 top_k still enter the
+        # candidate set and compete in Stage-3 RRF fusion.
+        _dense_overfetch = max(top_k * 4, 20)
         dense_scores: dict[str, float] = {}
         embed_text = self._expand_query_for_embed(query)
         query_vector = self._embed_for_recall(candidate_facts, embed_text)
         if query_vector is not None and self._dense.has_embeddings():
-            for f, sim in self._dense.search(query_vector, candidate_facts, top_k=top_k):
+            for f, sim in self._dense.search(query_vector, candidate_facts, top_k=_dense_overfetch):
                 dense_scores[f.id] = sim
                 candidate_ids.add(f.id)
 
@@ -737,17 +738,27 @@ class KnowledgeBase(_LearningMixin):
             reverse=True,
         )
 
-        fused_scores = _rrf_fuse(
-            [
-                bm25_ranked,
-                slot_ranked,
-                trigram_ranked,
-                importance_ranked,
-                retention_ranked,
-                recency_ranked,
-            ],
-            weights=list(config.rrf_weights),
-        )
+        # Build ranker list and weights; add dense as 8th signal when available.
+        # Per-intent dense_rrf_weight controls how much the dense signal contributes:
+        # FACTUAL=8.0 (replay-validated +0.12 cat1 PGR), BROAD_CONTEXT=2.0 (keeps
+        # BM25+importance dominant for short/vague queries), others=4.0.
+        _rrf_rankers = [
+            bm25_ranked,
+            slot_ranked,
+            trigram_ranked,
+            importance_ranked,
+            retention_ranked,
+            recency_ranked,
+        ]
+        _rrf_weights = list(config.rrf_weights)
+        if dense_scores and config.dense_rrf_weight > 0:
+            dense_ranked = sorted(
+                candidate_id_list, key=lambda fid: dense_scores.get(fid, 0.0), reverse=True
+            )
+            _rrf_rankers.append(dense_ranked)
+            _rrf_weights.append(config.dense_rrf_weight)
+
+        fused_scores = _rrf_fuse(_rrf_rankers, weights=_rrf_weights)
 
         selected_ids: list[str] = sorted(
             (fid for fid in candidate_id_list if fid in fact_map),
