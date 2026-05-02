@@ -169,6 +169,10 @@ class TestInterposedNounPhraseAggregation:
             "what is Alice salary",
             "where does Bob live",
             "when is the next meeting",
+            # Temporal anchor "on [month]" signals a point-in-time query even when the
+            # interrogative structure would otherwise match _AGGR_INTERP_RE.
+            "What gift did Alice give Bob on December 25",
+            "What book did they discuss on March 10",
         ],
     )
     def test_simple_point_queries_stay_factual(self, query: str) -> None:
