@@ -50,16 +50,6 @@ _AGGREGATION_PHRASES = (
     "what were",
     "know about",
 )
-# Catches "What [noun phrase] has/have/did/does X …" where a noun phrase is
-# interposed between the interrogative word and the main verb.  These are
-# enumeration queries that need diversity over precision, e.g.:
-#   "What activities has Melanie done?"  ← "what has" phrase doesn't fire
-#   "Which city have both Alice and Bob visited?"
-# Minimum gap of 3 chars prevents matching adjacent "who does" / "who has".
-_AGGR_INTERP_RE = re.compile(
-    r"\b(what|which|who)\b.{3,40}\b(has|have|had|did|do|does)\b",
-    re.IGNORECASE,
-)
 
 
 class _PoolQueryIntent(StrEnum):
@@ -477,12 +467,8 @@ def classify_recall_intent(query: str) -> RecallIntent:
         return RecallIntent.NAVIGATIONAL
 
     # 4. AGGREGATIONAL — breadth queries (reuse pool-path vocabulary).
-    # Also catches "What [noun phrase] has/have/did/does X …" where the phrase
-    # check would miss because the interrogative word and the verb are not adjacent.
-    has_agg_signal = (
-        bool(tok_set & _AGGREGATION_TOKENS)
-        or any(p in q_lower for p in _AGGREGATION_PHRASES)
-        or (len(content_tokens) >= 3 and bool(_AGGR_INTERP_RE.search(q_lower)))
+    has_agg_signal = bool(tok_set & _AGGREGATION_TOKENS) or any(
+        p in q_lower for p in _AGGREGATION_PHRASES
     )
     if has_agg_signal:
         return RecallIntent.AGGREGATIONAL
