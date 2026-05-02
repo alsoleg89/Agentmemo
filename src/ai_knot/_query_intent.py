@@ -368,15 +368,16 @@ class PipelineConfig:
 # Registry mapping RecallIntent → PipelineConfig.
 # RRF weight order: (BM25, slot-exact, trigram, importance, retention, recency).
 _PIPELINE_CONFIGS: dict[RecallIntent, PipelineConfig] = {
-    # FACTUAL: dense leads alongside BM25 for point queries.
-    # dense_rrf_weight=8.0 validated by replay (+0.12 cat1 PGR, no cat3 regression).
+    # FACTUAL: dense at BM25 parity for point queries.
+    # dense_rrf_weight=5.0 (parity with BM25) prevents a single semantic match
+    # from displacing the set of lexically-precise hits needed for multi-fact answers.
     RecallIntent.FACTUAL: PipelineConfig(
         skip_prf=True,
         rrf_weights=(5.0, 5.0, 2.0, 0.5, 0.5, 0.0),
         mmr_lambda=0.85,
         use_ddsa=False,
         sort_strategy="relevance",
-        dense_rrf_weight=8.0,
+        dense_rrf_weight=5.0,
     ),
     RecallIntent.AGGREGATIONAL: PipelineConfig(
         skip_prf=False,
