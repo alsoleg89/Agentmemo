@@ -60,14 +60,6 @@ _AGGR_INTERP_RE = re.compile(
     r"\b(what|which|who)\b.{3,40}\b(has|have|had|did|do|does)\b",
     re.IGNORECASE,
 )
-# Guard: queries anchored to "on [month]" name name a specific moment in time and are
-# point queries even when the interrogative structure matches _AGGR_INTERP_RE.
-# Example: "What painting did X share on October 13?" → point query, not enumeration.
-_ON_DATE_RE = re.compile(
-    r"\bon\s+(january|february|march|april|may|june|july|august|september"
-    r"|october|november|december)\b",
-    re.IGNORECASE,
-)
 
 
 class _PoolQueryIntent(StrEnum):
@@ -487,15 +479,10 @@ def classify_recall_intent(query: str) -> RecallIntent:
     # 4. AGGREGATIONAL — breadth queries (reuse pool-path vocabulary).
     # Also catches "What [noun phrase] has/have/did/does X …" where the phrase
     # check would miss because the interrogative word and the verb are not adjacent.
-    # Exception: queries anchored to "on [month]" are temporal point queries.
     has_agg_signal = (
         bool(tok_set & _AGGREGATION_TOKENS)
         or any(p in q_lower for p in _AGGREGATION_PHRASES)
-        or (
-            len(content_tokens) >= 3
-            and bool(_AGGR_INTERP_RE.search(q_lower))
-            and not bool(_ON_DATE_RE.search(q_lower))
-        )
+        or (len(content_tokens) >= 3 and bool(_AGGR_INTERP_RE.search(q_lower)))
     )
     if has_agg_signal:
         return RecallIntent.AGGREGATIONAL
