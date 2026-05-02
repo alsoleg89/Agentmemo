@@ -28,10 +28,15 @@ class TestRecallIntentClassifier:
             ("show me the log file from last week", RecallIntent.NAVIGATIONAL),
             ("find the meeting notes from Tuesday", RecallIntent.NAVIGATIONAL),
             ("open the report for Q1", RecallIntent.NAVIGATIONAL),
-            # AGGREGATIONAL
+            # AGGREGATIONAL — direct phrase match
             ("list all hobbies Melanie has", RecallIntent.AGGREGATIONAL),
             ("what are all the topics we discussed", RecallIntent.AGGREGATIONAL),
             ("summarize everything about the project", RecallIntent.AGGREGATIONAL),
+            # AGGREGATIONAL — interposed noun phrase (regex path)
+            ("What activities does Melanie partake in", RecallIntent.AGGREGATIONAL),
+            ("What events has Caroline participated in", RecallIntent.AGGREGATIONAL),
+            ("Which city have both Alice and Bob visited", RecallIntent.AGGREGATIONAL),
+            ("What European countries has Maria been to", RecallIntent.AGGREGATIONAL),
             # EXPLORATORY
             ("why did Alice decide to move to Boston", RecallIntent.EXPLORATORY),
             ("how does the caching mechanism work", RecallIntent.EXPLORATORY),
@@ -131,3 +136,43 @@ class TestPipelineConfigMatrix:
         for intent in RecallIntent:
             w = get_pipeline_config(intent).dense_rrf_weight
             assert w >= 0.0
+
+
+class TestInterposedNounPhraseAggregation:
+    """Regression tests for the _AGGR_INTERP_RE path in classify_recall_intent.
+
+    Guards against single-fact FACTUAL queries being mistakenly routed to
+    AGGREGATIONAL by the interposed-noun-phrase regex.
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "What activities does Melanie partake in",
+            "What events has Caroline participated in",
+            "Which city have both Alice and Bob visited",
+            "What European countries has Maria been to",
+            "What outdoor activities has John done with his colleagues",
+            "What items has Melanie bought recently",
+            "What causes does John feel passionate about",
+        ],
+    )
+    def test_interposed_noun_phrase_routes_to_aggregational(self, query: str) -> None:
+        assert classify_recall_intent(query) == RecallIntent.AGGREGATIONAL, (
+            f"{query!r} should route to AGGREGATIONAL (enumeration query with "
+            f"interposed noun phrase) but got {classify_recall_intent(query)!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "what is Alice salary",
+            "where does Bob live",
+            "when is the next meeting",
+        ],
+    )
+    def test_simple_point_queries_stay_factual(self, query: str) -> None:
+        assert classify_recall_intent(query) == RecallIntent.FACTUAL, (
+            f"{query!r} is a point query and must stay FACTUAL, "
+            f"got {classify_recall_intent(query)!r}"
+        )
